@@ -57,7 +57,23 @@ def main():
             print("FAIL {}: {} {}".format(name, run.stdout.strip(), run.stderr.strip()))
             return 1
         print("PASS {}".format(name))
-    print("SUMMARY passed={}/{}".format(len(cases), len(cases)))
+    highlighted = ("No worries, I understood the first time! Sweat and sweet are easy to "
+                   "mix up, especially when typing fast.\nThank")
+    noisy_row = "o worries, l understood the first time! Sweat and sweet are easy"
+    for trusted, expected in [(False, False), (True, True)]:
+        command = [str(BINARY), "--inspect-selection-focus", highlighted,
+                   "understood", noisy_row, "3"]
+        if trusted:
+            command.append("--trusted-selection")
+        run = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, timeout=10)
+        actual = run.stdout.strip().endswith("promotes=true")
+        if run.returncode or actual != expected:
+            print("FAIL highlighted AX noise: {} {}".format(run.stdout.strip(),
+                                                              run.stderr.strip()))
+            return 1
+        print("PASS highlighted AX noise trusted={}".format(trusted))
+    print("SUMMARY passed={}/{}".format(len(cases) + 2, len(cases) + 2))
     return 0
 
 

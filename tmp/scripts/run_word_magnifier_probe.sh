@@ -19,6 +19,6 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 PLIST
 
 swiftc -parse-as-library "$script_dir/word_magnifier_probe.swift" -o "$binary" \
-  -framework AppKit -framework Carbon -framework ScreenCaptureKit \
+  -framework AppKit -framework ApplicationServices -framework Carbon -framework ScreenCaptureKit \
   -framework NaturalLanguage -framework SwiftUI -framework Translation -framework Vision
 exec "$binary" "$@"

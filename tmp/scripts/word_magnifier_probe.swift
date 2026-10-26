@@ -1,6 +1,7 @@
 // Eye-shaped, click-through word translation experiment. The clear center is live desktop content.
 // ⌃⌥L toggles the lens; Esc hides it. Optional: --fixed-point <x> <y> (AppKit coordinates).
 import AppKit
+import ApplicationServices
 import Carbon.HIToolbox
 import Darwin
 import ImageIO
@@ -12,6 +13,93 @@ import Vision
 
 private func uptime() -> Double { ProcessInfo.processInfo.systemUptime }
 private func ms(_ start: Double) -> Double { (uptime() - start) * 1_000 }
+
+// Highlighted white text on blue has weak contrast for Vision's fast model.
+// Keep bright neutral glyph pixels and darken the selection fill in memory.
+private func highContrastSelectionImage(_ image: CGImage) -> CGImage? {
+    let width = image.width
+    let height = image.height
+    let rowBytes = width * 4
+    var pixels = [UInt8](repeating: 0, count: rowBytes * height)
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue |
+        CGBitmapInfo.byteOrder32Big.rawValue
+    guard let context = CGContext(data: &pixels, width: width, height: height,
+                                  bitsPerComponent: 8, bytesPerRow: rowBytes,
+                                  space: colorSpace, bitmapInfo: bitmapInfo) else { return nil }
+    context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    for offset in stride(from: 0, to: pixels.count, by: 4) {
+        let red = Int(pixels[offset])
+        let green = Int(pixels[offset + 1])
+        let blue = Int(pixels[offset + 2])
+        let brightGlyph = min(red, green, blue) >= 175
+        let value: UInt8 = brightGlyph ? 255 : 0
+        pixels[offset] = value
+        pixels[offset + 1] = value
+        pixels[offset + 2] = value
+        pixels[offset + 3] = 255
+    }
+    return context.makeImage()
+}
+
+private struct LiveSelection {
+    let text: String?
+    let state: String
+    let hasSelection: Bool
+}
+
+// Reading the highlighted text does not change the clipboard or the target app.
+// A short AX timeout keeps an unresponsive app from holding up the lens.
+private func readLiveSelection() -> LiveSelection {
+    guard AXIsProcessTrusted() else {
+        return LiveSelection(text: nil, state: "permission-denied", hasSelection: false)
+    }
+    guard let target = NSWorkspace.shared.frontmostApplication,
+          target.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+        return LiveSelection(text: nil, state: "no-target", hasSelection: false)
+    }
+    let application = AXUIElementCreateApplication(target.processIdentifier)
+    AXUIElementSetMessagingTimeout(application, 0.2)
+    var focused: CFTypeRef?
+    let focusError = AXUIElementCopyAttributeValue(
+        application, kAXFocusedUIElementAttribute as CFString, &focused)
+    guard focusError == .success, let focused else {
+        return LiveSelection(text: nil, state: "focus-\(focusError.rawValue)",
+                             hasSelection: false)
+    }
+    let element = focused as! AXUIElement
+    AXUIElementSetMessagingTimeout(element, 0.2)
+    var value: CFTypeRef?
+    let selectionError = AXUIElementCopyAttributeValue(
+        element, kAXSelectedTextAttribute as CFString, &value)
+    var raw = selectionError == .success ? value as? String : nil
+    var method = "selected-text"
+    if raw?.isEmpty != false {
+        // WebKit exposes the current highlight as a text-marker range even
+        // when AXSelectedText returns kAXErrorNoValue.
+        var markerRange: CFTypeRef?
+        let rangeError = AXUIElementCopyAttributeValue(
+            element, "AXSelectedTextMarkerRange" as CFString, &markerRange)
+        if rangeError == .success, let markerRange {
+            var markedText: CFTypeRef?
+            let markedError = AXUIElementCopyParameterizedAttributeValue(
+                element, "AXStringForTextMarkerRange" as CFString,
+                markerRange, &markedText)
+            if markedError == .success {
+                raw = markedText as? String
+                method = "text-marker"
+            }
+        }
+    }
+    guard let raw,
+          !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        return LiveSelection(text: nil, state: "empty-\(selectionError.rawValue)",
+                             hasSelection: false)
+    }
+    let text = eligibleClipboardHint(raw)
+    return LiveSelection(text: text, state: text == nil ? "ineligible" : method,
+                         hasSelection: true)
+}
 
 private struct FocusedPassage {
     let anchor: String
@@ -394,7 +482,8 @@ private func oneEditCost(_ first: [Character], _ second: [Character]) -> Int? {
 }
 
 private func selectedTextAtFocus(_ hint: String, anchor: String,
-                                 focusLine: String, focusWordIndex: Int) -> String? {
+                                 focusLine: String, focusWordIndex: Int,
+                                 allowShortOCRNoise: Bool = false) -> String? {
     guard hint.count <= 400 else { return nil }
     let selected = clipboardWords(hint).map(foldedLetters)
     let visible = clipboardWords(focusLine).map(foldedLetters)
@@ -422,6 +511,7 @@ private func selectedTextAtFocus(_ hint: String, anchor: String,
             var lower = start
             var upper = end
             var edits = focusCost
+            var verifiedWords = 1
             var conflict = false
             for rowIndex in firstRow...lastRow where rowIndex != focusWordIndex {
                 let rowWord = visible[rowIndex]
@@ -440,9 +530,13 @@ private func selectedTextAtFocus(_ hint: String, anchor: String,
                 guard mappedStart >= 0, mappedEnd <= source.count,
                       let cost = oneEditCost(rowWord,
                                              Array(source[mappedStart..<mappedEnd])) else {
+                    // AX confirms an active selection. Vision often reads a
+                    // selected "I" as "l" or clips the first letter of "No".
+                    if allowShortOCRNoise && rowWord.count <= 2 { continue }
                     conflict = true
                     break
                 }
+                verifiedWords += 1
                 edits += cost
                 if edits > 1 {
                     conflict = true
@@ -456,7 +550,9 @@ private func selectedTextAtFocus(_ hint: String, anchor: String,
                 selectedStarts[$0] >= lower &&
                     selectedStarts[$0] + selected[$0].count <= upper
             }.count
-            if matchedWords >= 2 { return hint }
+            if matchedWords >= 2 && (!allowShortOCRNoise || verifiedWords >= 2) {
+                return hint
+            }
         }
     }
     return nil
@@ -1183,6 +1279,8 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
     private var clipboardHint: String?
     private var clipboardHintDeadline = 0.0
     private var clipboardHintMisses = 0
+    private var activeSelectionHint: String?
+    private var activeSelectionSource = "none"
     private var selectionRequestID = 0
     private var pendingSelectionText: String?
     private var selectionCache: [String: String] = [:]
@@ -1374,6 +1472,8 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
             .flatMap { clipboardWords($0).count > 1 ? $0 : nil }
         clipboardHintDeadline = uptime() + 5
         clipboardHintMisses = 0
+        activeSelectionHint = nil
+        activeSelectionSource = "none"
         selectionRequestID += 1
         pendingSelectionText = nil
         showingSelectionCard = false
@@ -1416,6 +1516,8 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
         pendingTranslationKey = nil
         clipboardHint = nil
         clipboardHintMisses = 0
+        activeSelectionHint = nil
+        activeSelectionSource = "none"
         selectionRequestID += 1
         pendingSelectionText = nil
         showingSelectionCard = false
@@ -1444,17 +1546,19 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
         let pasteboard = NSPasteboard.general
         guard pasteboard.changeCount != pasteboardChangeCount else { return }
         pasteboardChangeCount = pasteboard.changeCount
-        selectionRequestID += 1
-        pendingSelectionText = nil
-        showingSelectionCard = false
         clipboardHint = pasteboard.string(forType: .string).flatMap(eligibleClipboardHint)
         clipboardHintDeadline = uptime() + 5
         clipboardHintMisses = 0
-        generation += 1
-        inspectedGeneration = -1
-        nextInspectionAt = 0
-        pendingTranslationKey = nil
-        translationPanel.orderOut(nil)
+        if activeSelectionSource != "accessibility" {
+            selectionRequestID += 1
+            pendingSelectionText = nil
+            showingSelectionCard = false
+            generation += 1
+            inspectedGeneration = -1
+            nextInspectionAt = 0
+            pendingTranslationKey = nil
+            translationPanel.orderOut(nil)
+        }
         if let clipboardHint {
             print("CLIPBOARD_HINT accepted length=\(clipboardHint.count)")
         } else {
@@ -1467,11 +1571,13 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
         guard clipboardHint != nil else { return }
         clipboardHint = nil
         clipboardHintMisses = 0
-        selectionRequestID += 1
-        pendingSelectionText = nil
-        if showingSelectionCard {
-            translationPanel.orderOut(nil)
-            showingSelectionCard = false
+        if activeSelectionSource != "accessibility" {
+            selectionRequestID += 1
+            pendingSelectionText = nil
+            if showingSelectionCard {
+                translationPanel.orderOut(nil)
+                showingSelectionCard = false
+            }
         }
         print("CLIPBOARD_HINT ended reason=\(reason)")
         fflush(stdout)
@@ -1544,11 +1650,13 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
                 return
             }
             selectionCache[source] = translated
-            if panel.isVisible, clipboardHint == source,
+            if panel.isVisible, activeSelectionHint == source,
+               (activeSelectionSource != "accessibility" || readLiveSelection().text == source),
                let currentAnchor, let currentFocusLine, let currentFocusWordIndex,
                selectedTextAtFocus(source, anchor: currentAnchor,
                                    focusLine: currentFocusLine,
-                                   focusWordIndex: currentFocusWordIndex) != nil {
+                                   focusWordIndex: currentFocusWordIndex,
+                                   allowShortOCRNoise: activeSelectionSource == "accessibility") != nil {
                 showSelectionCard(translated, pointer: fixedPoint ?? NSEvent.mouseLocation)
             }
             print(String(format: "SELECTION_TRANSLATION translatedMs=%.1f resolved=yes cloudCalls=0",
@@ -1609,11 +1717,14 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
         let pointer = fixedPoint ?? NSEvent.mouseLocation
         pollClipboard()
         if clipboardHint != nil && uptime() >= clipboardHintDeadline {
+            let affectsFocus = activeSelectionSource != "accessibility"
             endClipboardHint(reason: "expired")
-            generation += 1
-            inspectedGeneration = -1
-            nextInspectionAt = 0
-            pendingTranslationKey = nil
+            if affectsFocus {
+                generation += 1
+                inspectedGeneration = -1
+                nextInspectionAt = 0
+                pendingTranslationKey = nil
+            }
         }
         let nextFrame = frame(around: pointer)
         if panel.frame.origin != nextFrame.origin {
@@ -1671,10 +1782,29 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
             let focus = CGPoint(x: (pointer.x - scan.minX) / scan.width,
                                 y: (pointer.y - scan.minY) / scan.height)
             let hint = clipboardHint
+            let selectedAtCapture = readLiveSelection().hasSelection
             let (passage, ocrMs) = try await Task.detached(priority: .userInitiated) {
-                try passageAtCenter(scanImage, focus: focus, clipboardHint: hint)
+                if selectedAtCapture,
+                   let highContrast = highContrastSelectionImage(scanImage) {
+                    let result = try passageAtCenter(highContrast, focus: focus,
+                                                     clipboardHint: hint)
+                    if result.0 != nil { return result }
+                }
+                return try passageAtCenter(scanImage, focus: focus, clipboardHint: hint)
             }.value
             guard panel.isVisible, current == generation else { return }
+            let live = readLiveSelection()
+            let source = live.hasSelection ? "accessibility" :
+                (clipboardHint == nil ? "none" : "clipboard")
+            let selectionHint = live.hasSelection ? live.text : clipboardHint
+            if activeSelectionHint != selectionHint || activeSelectionSource != source {
+                selectionRequestID += 1
+                pendingSelectionText = nil
+                activeSelectionHint = selectionHint
+                activeSelectionSource = source
+                print("SELECTION_SOURCE source=\(source) axState=\(live.state) length=\(selectionHint?.count ?? 0)")
+                fflush(stdout)
+            }
             view.isReading = false
             guard let passage else {
                 if showingSelectionCard {
@@ -1730,10 +1860,11 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
             print(String(format: "SENTENCE_FOCUS found anchorLength=%d sentenceLength=%d distance=%.3f scanMs=%.1f ocrMs=%.1f",
                          passage.anchor.count, passage.sentence.count, passage.distance, scanMs, ocrMs))
             fflush(stdout)
-            let selected = clipboardHint.flatMap {
+            let selected = selectionHint.flatMap {
                 selectedTextAtFocus($0, anchor: passage.anchor,
                                     focusLine: passage.focusLine,
-                                    focusWordIndex: passage.focusWordIndex)
+                                    focusWordIndex: passage.focusWordIndex,
+                                    allowShortOCRNoise: source == "accessibility")
             }
             if let selected {
                 if let cached = selectionCache[selected] {
@@ -1746,7 +1877,7 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
                 }
                 return
             }
-            if let hint = clipboardHint, clipboardWords(hint).count > 1 {
+            if let hint = selectionHint, clipboardWords(hint).count > 1 {
                 let reason = passage.focusWordIndex < 0 ? "no-direct-hit" : "focus-row-mismatch"
                 print(String(format: "SELECTION_FOCUS skipped reason=%@ distance=%.3f hintWords=%d rowWords=%d",
                              reason, passage.distance, clipboardWords(hint).count,
@@ -1801,10 +1932,13 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
         guard panel.isVisible, current == generation,
               let currentSentence, let currentAnchor else { return }
         pendingTranslationKey = nil
-        if let hint = clipboardHint, let currentFocusLine, let currentFocusWordIndex,
+        if let hint = activeSelectionHint, let currentFocusLine, let currentFocusWordIndex,
            selectedTextAtFocus(hint, anchor: currentAnchor,
                                focusLine: currentFocusLine,
-                               focusWordIndex: currentFocusWordIndex) != nil { return }
+                               focusWordIndex: currentFocusWordIndex,
+                               allowShortOCRNoise: activeSelectionSource == "accessibility") != nil {
+            return
+        }
         switch result {
         case .success(let (translation, elapsed)):
             translationFailures = 0
@@ -1925,6 +2059,11 @@ private final class SelectionTranslationSelfTest: NSObject, NSApplicationDelegat
 private enum WordMagnifierMain {
     @MainActor static func main() {
         let args = CommandLine.arguments
+        if args.contains("--inspect-ax-selection") {
+            let selection = readLiveSelection()
+            print("AX_SELECTION state=\(selection.state) length=\(selection.text?.count ?? 0)")
+            return
+        }
         if let index = args.firstIndex(of: "--translate-selection"), index + 1 < args.count {
             let app = NSApplication.shared
             let delegate = SelectionTranslationSelfTest(source: args[index + 1])
@@ -2009,7 +2148,8 @@ private enum WordMagnifierMain {
             let selected = hint.flatMap {
                 selectedTextAtFocus($0, anchor: args[index + 2],
                                     focusLine: args[index + 3],
-                                    focusWordIndex: wordIndex)
+                                    focusWordIndex: wordIndex,
+                                    allowShortOCRNoise: args.contains("--trusted-selection"))
             }
             print("SELECTION_FOCUS_INSPECTION promotes=\(selected != nil)")
             return
@@ -2031,8 +2171,10 @@ private enum WordMagnifierMain {
                     let hintIndex = args.firstIndex(of: "--clipboard-hint")
                     let hint = hintIndex.flatMap { $0 + 1 < args.count ?
                         eligibleClipboardHint(args[$0 + 1]) : nil }
+                    let processed = args.contains("--selection-contrast") ?
+                        highContrastSelectionImage(cropped) ?? cropped : cropped
                     let (passage, ocrMs) = try passageAtCenter(
-                        cropped, focus: focus, debug: args.contains("--show-ocr"),
+                        processed, focus: focus, debug: args.contains("--show-ocr"),
                         accurate: args.contains("--accurate-ocr"), clipboardHint: hint)
                     print(String(format: "SENTENCE_INSPECTION found=%@ length=%d ocrMs=%.1f",
                                  passage == nil ? "no" : "yes", passage?.sentence.count ?? 0, ocrMs))

@@ -4,9 +4,9 @@
 
 ## 目标与优先级
 
-**视觉焦点始终决定翻译对象。** 用户复制 `ne` 后把镜片指向 `one`，`ne` 是对 `one` 的局部佐证；之后镜片指向 `Two`，先前复制的 `one` 或 `ne` 不应让卡片继续显示 `one`。若复制的是多词选区，只有镜片指向的 OCR 行和焦点词位置能证实该选区，才翻译复制的整段文本；否则仍翻译焦点单词。
+**视觉焦点始终决定翻译对象。** 用户复制 `ne` 后把镜片指向 `one`，`ne` 是对 `one` 的局部佐证；之后镜片指向 `Two`，先前复制的 `one` 或 `ne` 不应让卡片继续显示 `one`。若当前高亮选区或复制的多词文本覆盖镜片焦点，翻译整段选中文本；否则仍翻译焦点单词。
 
-本实验所谓“选区”实际是用户复制到剪贴板的文本；它不读取其他应用的选区高亮，也不自动发出 `⌘C`。蓝色高亮本身不会触发整句翻译。
+当前实验优先通过 macOS 辅助功能读取前台应用聚焦控件的 `AXSelectedText`；WebKit 网页控件若只提供 `AXSelectedTextMarkerRange`，则使用 `AXStringForTextMarkerRange` 读取。有高亮选区时无需 `⌘C`。若目标应用未提供选区，则回退到原有的短期剪贴板提示；不自动发出 `⌘C`。
 
 ## 机制
 
@@ -19,7 +19,7 @@
 ## 边界
 
 - 片段包含匹配可佐证词，但不等于语义确定：`ne` 可能同时存在于多个词中，因此它只在几何焦点已明确时参与；缺字修正要求唯一复制词和一字符差异。
-- 对未复制的高亮选区无感知。网页翻页但新页面在同一位置出现完全相同的词，单凭局部 OCR 无法识别它属于不同页面；5 秒租期限制提示寿命。
+- 当前高亮选区可通过辅助功能读取，前提是 EasyLens 有辅助功能权限且目标控件提供 `AXSelectedText`。不同应用的支持程度仍需实际验证；无选区时剪贴板提示仍受 5 秒租期限制。网页翻页但新页面在同一位置出现完全相同的词，单凭局部 OCR 仍无法区分。
 - 唤醒前复制的多词文本会被作为短时候选，因此即使页面高亮已消失，只要同一文本仍位于焦点处，也可能触发选区翻译；它依赖视觉核对，不能证明操作系统当前仍有活动选区。
 - 复制内容没有选区几何坐标。若不同的紧凑行恰好出现完全相同的相邻词序列，本实验无法仅凭剪贴板和 OCR 区分其来源；需要进一步验证辅助功能选区坐标是否可用。OCR 把一行切成孤立单词时会保守地回退到单词翻译。
 - 短拉丁词来自其他语言、复杂剪贴板格式和真实跨应用复制流程仍需用户试用。日志只记录提示长度与状态，不记录复制原文或译文；没有云端调用。
@@ -34,10 +34,24 @@
 
 本次还修复了运行检查发现的 OCR 字符串替换越界：先以正则识别出的实际词范围修正 OCR，再从修正后的词范围构造各级翻译上下文。六个本机截图焦点的静态 OCR 检查均正常退出，最终构建再次启动并记录到 `CAPTURE_READY`。本机翻译单词 `before` 返回“以前”（早先一次检查返回“之前”），短语用法 `after` 返回“想要”；时间用法 `after midnight` 返回“在之后”。
 
-## 截图复盘：选中整句却只显示 Friday
+## 前期剪贴板实验记录（已被后续辅助功能实验扩展）
+
+以下两节保留当时的证据与结论；其中“高亮仍需复制”的操作要求已不适用于当前可读取辅助功能选区的应用。
+
+### 截图复盘：选中整句却只显示 Friday
 
 截图只能证明文字被高亮，无法证明剪贴板已收到复制。旧实现还有一个可复现的拒绝路径：整句已复制、焦点 `Friday` 周围正确，但同一行远处的 `attached` 被 OCR 错读，整句匹配返回失败。这次将比对限制在焦点左右各两个词，并允许镜片唤醒前已复制的多词文本进入短时视觉核对；多词提示遇到一次不匹配或漏读不立即清除。十组定向检查中，该截图句子带远端错字可触发整句，`before the meeting` 对邻行 `before the calendar` 仍被拒绝。`--translate-selection '<英文整句>'` 走实际本地 Translation 桥接，示例句约 835 ms 返回完整中文。真实网页中的高亮、复制和镜片联动仍待交互验证。
 
-## 截图复盘：选中整句却显示 ThanksagaIn
+### 截图复盘：选中整句却显示 ThanksagaIn
 
 新截图的单词卡显示 `ThanksagaIn`，而高亮句开头是 `Thanks again`：这是焦点处的 OCR 合词加错字，旧规则要求焦点词在剪贴板中原样出现，因此选区路径必然失败。现改用复制文本和焦点 OCR 行的字母流做局部对齐，不再先要求这个 OCR 合词是有效单词。单字符容错只用于至少五个字母的词，避免把 `is` 误作 `in`。运行 `python3 tmp/scripts/check_selection_focus_cases.py`，`ThanksagaIn` 对复制的 `Thanks again...` 可以进入选区路径；邻行 `line thirteen selected` 对 `line twelve selected`、`before the calendar` 对 `before the meeting`、旧 `one two` 对新 `Two`、重复词错误位置和附近实词冲突仍被拒绝，共 12 例符合预期。高亮本身仍不等于复制，真实页面需要按 `⌘C` 后测试。
+
+## 实测修正：直接读取高亮选区
+
+此前规则检查与本地翻译接口测试都通过，但未在实际高亮选区的完整路径上成功。真实窗口实验先确认 `AXSelectedText` 返回 111 个字符，同时发现 Vision 将同一行的 `I` 读作 `l`、将 `No` 读作 `o`，旧匹配仍回退单词。现只对**辅助功能确认的当前选区**容忍邻近 1～2 字符 OCR 噪声，并要求至少两个视觉词得到验证；剪贴板提示仍沿用严格规则。系统选区优先于旧剪贴板，翻译返回时再次核对选区仍在。日志只记录来源、状态与长度，不记录选区正文。
+
+使用独立 NSTextView 窗口真正高亮英文段落后，不复制文本，镜片指向 `understood`，运行日志出现 `SELECTION_SOURCE source=accessibility ... length=105`、`SELECTION_TRANSLATION requested length=105` 和 `resolved=yes`，屏幕上显示了整段中文卡片；取消选区后日志回到 `source=none`。14 个焦点匹配定向检查通过。
+
+另用独立 WebKit 网页控件高亮同一英文段落做完整测试：`AXSelectedText` 返回空值，但文本标记范围可读到 105 个字符。蓝底白字使 Vision 快速模式漏读焦点，于是仅在有系统选区时把扫描图像中的明亮文字与背景做二值对比度处理；失败仍可回退原图。修正后，网页选区在未复制的情况下也出现 `source=accessibility axState=text-marker`、`SELECTION_TRANSLATION ... resolved=yes` 和正确的整段中文卡片，扫描约 50 ms、本地翻译约 300 ms（单次本机样本）。这证明 NSTextView 与 WebKit 测试页可用；截图来源的具体应用仍需用户在原页面实测。`--inspect-ax-selection` 只打印前台控件选区的状态与长度。
+
+复现时先编译 `swiftc tmp/scripts/selection_accessibility_fixture.swift -o tmp/scripts/.build/selection-fixture -framework AppKit -framework WebKit`，运行 `tmp/scripts/.build/selection-fixture --web`（去掉 `--web` 为原生文本控件），再用鱼眼指向高亮段落里的 `understood`。无需复制。若只看到单词卡，可运行 `tmp/scripts/.build/EasyLensProbe.app/Contents/MacOS/EasyLensProbe --inspect-ax-selection` 检查当前前台控件的选区状态与长度；`permission-denied` 表示 macOS 辅助功能权限尚未授权。
