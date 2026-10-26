@@ -1,0 +1,25 @@
+# Operating system and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+*.local
+
+# Dependencies, caches, logs, and temporary files
+node_modules/
+.venv/
+__pycache__/
+.cache/
+tmp/
+*.log
+
+# Build and test outputs
+dist/
+build/
+out/
+coverage/
