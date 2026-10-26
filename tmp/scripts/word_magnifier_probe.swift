@@ -386,13 +386,15 @@ private func selectedTextAtFocus(_ hint: String, anchor: String,
     // One copied word keeps the contextual focal translation. A fragment such as
     // “ne” remains OCR evidence for “one”, never an independent translation.
     guard selected.count > 1 else { return nil }
-    // Align every available selected word against this exact occurrence on
-    // the pointer's OCR row. A shared pair such as "before the" cannot stand
-    // in for a different third word on a tightly spaced neighboring row.
+    // OCR far from the focus can be noisy (emoji and selected text are common).
+    // Compare the focus and up to two words on each side on this exact row.
+    // The third word still disambiguates nearby "before the ..." lines.
     for selectedIndex in selected.indices where selected[selectedIndex] == focus[0] {
         var matched = 0
         var conflict = false
-        for index in selected.indices {
+        let local = max(0, selectedIndex - 2)...min(selected.count - 1,
+                                                    selectedIndex + 2)
+        for index in local {
             let rowIndex = focusWordIndex + index - selectedIndex
             guard visible.indices.contains(rowIndex) else { continue }
             if selected[index] != visible[rowIndex] {
@@ -1309,9 +1311,14 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
 
     private func showLens() {
         let pointer = fixedPoint ?? NSEvent.mouseLocation
-        pasteboardChangeCount = NSPasteboard.general.changeCount
+        let pasteboard = NSPasteboard.general
+        pasteboardChangeCount = pasteboard.changeCount
         nextPasteboardPollAt = 0
-        clipboardHint = nil
+        // A sentence may have been copied before the lens was opened. Reuse
+        // only multiword text; visual row and local-word checks still gate it.
+        clipboardHint = pasteboard.string(forType: .string).flatMap(eligibleClipboardHint)
+            .flatMap { clipboardWords($0).count > 1 ? $0 : nil }
+        clipboardHintDeadline = uptime() + 5
         clipboardHintMisses = 0
         selectionRequestID += 1
         pendingSelectionText = nil
@@ -1336,7 +1343,7 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
         timer = Timer.scheduledTimer(timeInterval: 1.0 / 60.0, target: self,
                                      selector: #selector(tick), userInfo: nil, repeats: true)
         Task { await prepareCapture() }
-        print("LENS_SHOWN")
+        print("LENS_SHOWN preexistingSelectionLength=\(clipboardHint?.count ?? 0)")
         fflush(stdout)
     }
 
@@ -1616,8 +1623,11 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
             guard panel.isVisible, current == generation else { return }
             view.isReading = false
             guard let passage else {
-                if showingSelectionCard { translationPanel.orderOut(nil) }
-                if clipboardHint != nil {
+                if showingSelectionCard {
+                    translationPanel.orderOut(nil)
+                    showingSelectionCard = false
+                }
+                if let hint = clipboardHint, clipboardWords(hint).count == 1 {
                     clipboardHintMisses += 1
                     if clipboardHintMisses >= 2 {
                         endClipboardHint(reason: "no-visual-focus")
@@ -1645,7 +1655,7 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
                 if hintSupportsFocus(hint, anchor: passage.anchor) {
                     clipboardHintMisses = 0
                     print("CLIPBOARD_HINT corroborated=true")
-                } else {
+                } else if clipboardWords(hint).count == 1 {
                     endClipboardHint(reason: "different-visual-focus")
                 }
             }
@@ -1666,10 +1676,12 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
             print(String(format: "SENTENCE_FOCUS found anchorLength=%d sentenceLength=%d distance=%.3f scanMs=%.1f ocrMs=%.1f",
                          passage.anchor.count, passage.sentence.count, passage.distance, scanMs, ocrMs))
             fflush(stdout)
-            if let hint = clipboardHint,
-               let selected = selectedTextAtFocus(hint, anchor: passage.anchor,
-                                                  focusLine: passage.focusLine,
-                                                  focusWordIndex: passage.focusWordIndex) {
+            let selected = clipboardHint.flatMap {
+                selectedTextAtFocus($0, anchor: passage.anchor,
+                                    focusLine: passage.focusLine,
+                                    focusWordIndex: passage.focusWordIndex)
+            }
+            if let selected {
                 if let cached = selectionCache[selected] {
                     showSelectionCard(cached, pointer: pointer)
                 } else if pendingSelectionText != selected {
@@ -1681,7 +1693,14 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
                 return
             }
             if let hint = clipboardHint, clipboardWords(hint).count > 1 {
-                endClipboardHint(reason: "outside-selected-line")
+                let reason = passage.focusWordIndex < 0 ? "no-direct-hit" : "focus-row-mismatch"
+                print(String(format: "SELECTION_FOCUS skipped reason=%@ distance=%.3f hintWords=%d rowWords=%d",
+                             reason, passage.distance, clipboardWords(hint).count,
+                             clipboardWords(passage.focusLine).count))
+            }
+            if showingSelectionCard {
+                translationPanel.orderOut(nil)
+                showingSelectionCard = false
             }
             let cacheKey = passage.anchor.lowercased() + "\n" + passage.sentence
             if let literal = passage.literalTranslation {
@@ -1817,10 +1836,49 @@ private final class FocusTranslationSelfTest: NSObject, NSApplicationDelegate {
     }
 }
 
+@MainActor
+private final class SelectionTranslationSelfTest: NSObject, NSApplicationDelegate {
+    private let bridge = SelectionTranslationBridge()
+    private let source: String
+    private var window: NSWindow!
+
+    init(source: String) { self.source = source }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        window = NSWindow(contentRect: CGRect(x: 20, y: 20, width: 120, height: 80),
+                          styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = NSHostingView(rootView: SelectionTranslationTaskView(bridge: bridge))
+        window.orderFront(nil)
+        bridge.onResult = { _, result in
+            switch result {
+            case .success(let (translated, elapsed)):
+                print(String(format: "SELECTION_SELF_TEST result=%@ translatedMs=%.1f",
+                             translated, elapsed))
+            case .failure(let error):
+                print("SELECTION_SELF_TEST_ERROR=\(error)")
+            }
+            fflush(stdout)
+            NSApp.terminate(nil)
+        }
+        Task {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            bridge.translate(source, requestID: 1)
+        }
+    }
+}
+
 @main
 private enum WordMagnifierMain {
     @MainActor static func main() {
         let args = CommandLine.arguments
+        if let index = args.firstIndex(of: "--translate-selection"), index + 1 < args.count {
+            let app = NSApplication.shared
+            let delegate = SelectionTranslationSelfTest(source: args[index + 1])
+            app.delegate = delegate
+            app.setActivationPolicy(.accessory)
+            app.run()
+            return
+        }
         if let index = args.firstIndex(of: "--translate-focus-both"), index + 9 < args.count {
             let app = NSApplication.shared
             let delegate = FocusTranslationSelfTest(anchor: args[index + 1],
