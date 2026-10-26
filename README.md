@@ -20,4 +20,6 @@ EasyLens 是一个规划中的桌面 AI 识别客户端。用户通过快捷键�
 - [docs/product-scope.md](docs/product-scope.md)：产品目标、首个迭代边界和待验证问题。
 - [docs/research-plan.md](docs/research-plan.md)：后续调研与迁移实验的记录方式。
 
+本地探索使用 `tmp/docs/` 存放调研草稿，`tmp/scripts/` 存放轻量实验脚本。Git 只保留这两个目录的占位文件，忽略其中的工作内容；定稿内容整理后归档到 `docs/`。
+
 当前不提供安装、构建或运行命令。确定技术选型并建立可运行工程后，再补充对应命令和验证流程。

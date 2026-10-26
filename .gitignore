@@ -15,6 +15,7 @@ node_modules/
 .venv/
 __pycache__/
 .cache/
+# Local research drafts and agile experiments
 tmp/
 *.log
 
