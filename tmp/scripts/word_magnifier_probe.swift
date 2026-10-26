@@ -266,9 +266,84 @@ private func validatedEnglishWord(_ raw: String) -> String? {
     }
 }
 
+private let clipboardWordRegex = try! NSRegularExpression(
+    pattern: "[A-Za-z]+(?:['’][A-Za-z]+)?")
+
+private func clipboardWords(_ text: String) -> [String] {
+    let source = text as NSString
+    return clipboardWordRegex.matches(in: text,
+                                      range: NSRange(location: 0, length: source.length)).map {
+        source.substring(with: $0.range).lowercased()
+            .replacingOccurrences(of: "’", with: "'")
+    }
+}
+
+private func eligibleClipboardHint(_ raw: String) -> String? {
+    let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard (2...400).contains(text.count),
+          text.range(of: "[A-Za-z]", options: .regularExpression) != nil,
+          !text.unicodeScalars.contains(where: { (0x3400...0x9FFF).contains($0.value) }),
+          !looksLikePathOrCode(text), !text.contains("{") && !text.contains("}") else {
+        return nil
+    }
+    if clipboardWords(text).count >= 3 {
+        let recognizer = NLLanguageRecognizer()
+        recognizer.processString(text)
+        if (recognizer.languageHypotheses(withMaximum: 3)[.english] ?? 0) < 0.35 {
+            return nil
+        }
+    }
+    return text
+}
+
+private func oneMissingCharacter(_ complete: String, _ fragment: String) -> Bool {
+    let letters = Array(complete)
+    guard letters.count == fragment.count + 1 else { return false }
+    return letters.indices.contains { index in
+        var candidate = letters
+        candidate.remove(at: index)
+        return String(candidate) == fragment
+    }
+}
+
+private func hintSupportsFocus(_ hint: String, anchor: String) -> Bool {
+    let targetWords = clipboardWords(anchor)
+    return clipboardWords(hint).contains { word in
+        guard word.count >= 2 else { return false }
+        if targetWords.contains(word) { return true }
+        // A complete copied word is not evidence for a different, shorter word.
+        if validatedEnglishWord(word)?.caseInsensitiveCompare(word) == .orderedSame {
+            return false
+        }
+        return targetWords.contains {
+            $0.contains(word) || oneMissingCharacter($0, word)
+        }
+    }
+}
+
+private func hintedOCRCorrection(_ raw: String, hint: String?) -> String? {
+    guard let hint else { return nil }
+    let rawLower = raw.lowercased().replacingOccurrences(of: "’", with: "'")
+    let candidates = clipboardWords(hint).filter {
+        oneMissingCharacter($0, rawLower) && validatedEnglishWord($0) != nil
+    }
+    return candidates.count == 1 ? candidates[0] : nil
+}
+
+private func focusedWordWithHint(_ raw: String, hint: String?) ->
+    (word: String?, usedHint: Bool) {
+    let ordinary = validatedEnglishWord(raw)
+    guard ordinary?.caseInsensitiveCompare(raw) != .orderedSame,
+          let hinted = hintedOCRCorrection(raw, hint: hint) else {
+        return (ordinary, false)
+    }
+    return (hinted, true)
+}
+
 private func passageAtCenter(_ image: CGImage, focus: CGPoint,
                              debug: Bool = false,
-                             accurate: Bool = false) throws -> (FocusedPassage?, Double) {
+                             accurate: Bool = false,
+                             clipboardHint: String? = nil) throws -> (FocusedPassage?, Double) {
     let start = uptime()
     let request = VNRecognizeTextRequest()
     request.recognitionLevel = accurate ? .accurate : .fast
@@ -370,7 +445,7 @@ private func passageAtCenter(_ image: CGImage, focus: CGPoint,
     let pathRows = rows.filter { looksLikePathOrCode($0.text) }.map { $0.box.midY }
     var found: [(row: Int, anchor: String, range: NSRange,
                  distance: CGFloat, centerDistance: CGFloat,
-                 literalTranslation: String?)] = []
+                 literalTranslation: String?, hinted: Bool)] = []
     for (rowIndex, row) in rows.enumerated() {
         guard !pathRows.contains(where: { abs($0 - row.box.midY) < 0.04 }),
               !looksLikePathOrCode(row.text) else { continue }
@@ -407,7 +482,8 @@ private func passageAtCenter(_ image: CGImage, focus: CGPoint,
             let centerDistance = hypot((box.midX - focus.x) / 0.04,
                                        (box.midY - focus.y) / 0.055)
             found.append((rowIndex, displayAnchor, match.range, distance,
-                          centerDistance, translation))
+                          centerDistance, translation,
+                          clipboardHint.map { hintSupportsFocus($0, anchor: displayAnchor) } ?? false))
         }
         let matches = regex.matches(in: row.text, range: rowRange)
         for match in matches {
@@ -425,14 +501,20 @@ private func passageAtCenter(_ image: CGImage, focus: CGPoint,
             }
             guard distance <= 1 else { continue }
             if rawWord.count <= 2 && distance > 0.25 { continue }
-            guard let anchor = validatedEnglishWord(rawWord) else { continue }
+            guard let anchor = focusedWordWithHint(rawWord, hint: clipboardHint).word else {
+                continue
+            }
             let centerDistance = hypot((wordBox.midX - focus.x) / 0.04,
                                        (wordBox.midY - focus.y) / 0.055)
-            found.append((rowIndex, anchor, match.range, distance, centerDistance, nil))
+            found.append((rowIndex, anchor, match.range, distance, centerDistance,
+                          nil, clipboardHint.map { hintSupportsFocus($0, anchor: anchor) } ?? false))
         }
     }
     guard let focused = found.min(by: {
-        $0.distance == $1.distance ?
+        if $0.distance == 0 && $1.distance == 0 && $0.hinted != $1.hinted {
+            return $0.hinted
+        }
+        return $0.distance == $1.distance ?
             $0.centerDistance < $1.centerDistance : $0.distance < $1.distance
     }),
           focused.distance <= 1 else { return (nil, ms(start)) }
@@ -892,6 +974,11 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
     private var currentAnchor: String?
     private var pendingTranslationKey: String?
     private var translationCache: [String: FocusedTranslation] = [:]
+    private var pasteboardChangeCount = 0
+    private var nextPasteboardPollAt = 0.0
+    private var clipboardHint: String?
+    private var clipboardHintDeadline = 0.0
+    private var clipboardHintMisses = 0
     private var fixedPoint: CGPoint? {
         let args = CommandLine.arguments
         guard let index = args.firstIndex(of: "--fixed-point"), index + 2 < args.count,
@@ -1063,6 +1150,10 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
 
     private func showLens() {
         let pointer = fixedPoint ?? NSEvent.mouseLocation
+        pasteboardChangeCount = NSPasteboard.general.changeCount
+        nextPasteboardPollAt = 0
+        clipboardHint = nil
+        clipboardHintMisses = 0
         lastPointer = pointer
         lastMoveAt = uptime()
         generation += 1
@@ -1096,6 +1187,8 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
         currentSentence = nil
         currentAnchor = nil
         pendingTranslationKey = nil
+        clipboardHint = nil
+        clipboardHintMisses = 0
         print("LENS_HIDDEN")
         fflush(stdout)
     }
@@ -1113,6 +1206,28 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
         let y = max(screen.frame.minY, min(pointer.y - lensSize.height / 2,
                                           screen.frame.maxY - lensSize.height))
         return CGRect(origin: CGPoint(x: x, y: y), size: lensSize)
+    }
+
+    private func pollClipboard() {
+        guard uptime() >= nextPasteboardPollAt else { return }
+        nextPasteboardPollAt = uptime() + 0.2
+        let pasteboard = NSPasteboard.general
+        guard pasteboard.changeCount != pasteboardChangeCount else { return }
+        pasteboardChangeCount = pasteboard.changeCount
+        clipboardHint = pasteboard.string(forType: .string).flatMap(eligibleClipboardHint)
+        clipboardHintDeadline = uptime() + 5
+        clipboardHintMisses = 0
+        if let clipboardHint {
+            generation += 1
+            inspectedGeneration = -1
+            nextInspectionAt = 0
+            pendingTranslationKey = nil
+            translationPanel.orderOut(nil)
+            print("CLIPBOARD_HINT accepted length=\(clipboardHint.count)")
+        } else {
+            print("CLIPBOARD_HINT skipped=non-english-or-unsupported")
+        }
+        fflush(stdout)
     }
 
     private func showFocusCard(_ chinese: String, anchor: String, basis: String,
@@ -1182,6 +1297,17 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
     @objc private func tick() {
         guard panel.isVisible else { return }
         let pointer = fixedPoint ?? NSEvent.mouseLocation
+        pollClipboard()
+        if clipboardHint != nil && uptime() >= clipboardHintDeadline {
+            clipboardHint = nil
+            clipboardHintMisses = 0
+            generation += 1
+            inspectedGeneration = -1
+            nextInspectionAt = 0
+            pendingTranslationKey = nil
+            translationPanel.orderOut(nil)
+            print("CLIPBOARD_HINT ended reason=expired")
+        }
         let nextFrame = frame(around: pointer)
         if panel.frame.origin != nextFrame.origin {
             panel.setFrame(nextFrame, display: true)
@@ -1235,12 +1361,20 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
             let scanMs = ms(scanStart)
             let focus = CGPoint(x: (pointer.x - scan.minX) / scan.width,
                                 y: (pointer.y - scan.minY) / scan.height)
+            let hint = clipboardHint
             let (passage, ocrMs) = try await Task.detached(priority: .userInitiated) {
-                try passageAtCenter(scanImage, focus: focus)
+                try passageAtCenter(scanImage, focus: focus, clipboardHint: hint)
             }.value
             guard panel.isVisible, current == generation else { return }
             view.isReading = false
             guard let passage else {
+                if clipboardHint != nil {
+                    clipboardHintMisses += 1
+                    if clipboardHintMisses >= 2 {
+                        clipboardHint = nil
+                        print("CLIPBOARD_HINT ended reason=no-visual-focus")
+                    }
+                }
                 if currentSentence != nil {
                     generation += 1
                     currentSentence = nil
@@ -1257,6 +1391,16 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
                 return
             }
             consecutiveMisses = 0
+            if let hint = clipboardHint {
+                if hintSupportsFocus(hint, anchor: passage.anchor) {
+                    clipboardHintMisses = 0
+                    print("CLIPBOARD_HINT corroborated=true")
+                } else {
+                    clipboardHint = nil
+                    clipboardHintMisses = 0
+                    print("CLIPBOARD_HINT ended reason=different-visual-focus")
+                }
+            }
             if currentAnchor != passage.anchor || currentSentence != passage.sentence {
                 generation += 1
                 pendingTranslationKey = nil
@@ -1467,6 +1611,15 @@ private enum WordMagnifierMain {
             print("WORD_VALIDATION=\(validatedEnglishWord(args[index + 1]) ?? "unresolved")")
             return
         }
+        if let index = args.firstIndex(of: "--inspect-clipboard-hint"), index + 2 < args.count {
+            let hint = eligibleClipboardHint(args[index + 1])
+            let anchor = args[index + 2]
+            let raw = index + 3 < args.count ? args[index + 3] : anchor
+            let supports = hint.map { hintSupportsFocus($0, anchor: anchor) } ?? false
+            let outcome = focusedWordWithHint(raw, hint: hint)
+            print("CLIPBOARD_HINT_INSPECTION eligible=\(hint != nil) supports=\(supports) resolved=\(outcome.word ?? "none") usedHint=\(outcome.usedHint)")
+            return
+        }
         if let index = args.firstIndex(of: "--inspect-image"), index + 3 < args.count,
            let x = Double(args[index + 2]), let y = Double(args[index + 3]),
            let source = CGImageSourceCreateWithURL(
@@ -1481,9 +1634,12 @@ private enum WordMagnifierMain {
                 do {
                     let focus = CGPoint(x: (x - area.minX) / area.width,
                                         y: 1 - (y - area.minY) / area.height)
+                    let hintIndex = args.firstIndex(of: "--clipboard-hint")
+                    let hint = hintIndex.flatMap { $0 + 1 < args.count ?
+                        eligibleClipboardHint(args[$0 + 1]) : nil }
                     let (passage, ocrMs) = try passageAtCenter(
                         cropped, focus: focus, debug: args.contains("--show-ocr"),
-                        accurate: args.contains("--accurate-ocr"))
+                        accurate: args.contains("--accurate-ocr"), clipboardHint: hint)
                     print(String(format: "SENTENCE_INSPECTION found=%@ length=%d ocrMs=%.1f",
                                  passage == nil ? "no" : "yes", passage?.sentence.count ?? 0, ocrMs))
                     if args.contains("--show-word"), let passage {
