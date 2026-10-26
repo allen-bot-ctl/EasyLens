@@ -368,42 +368,96 @@ private func hintSupportsFocus(_ hint: String, anchor: String) -> Bool {
     }
 }
 
+private func foldedLetters(_ text: String) -> [Character] {
+    Array(text.lowercased().filter { $0.isASCII && $0.isLetter })
+}
+
+private func oneEditCost(_ first: [Character], _ second: [Character]) -> Int? {
+    let allowed = min(first.count, second.count) >= 5 ? 1 : 0
+    guard abs(first.count - second.count) <= allowed else { return nil }
+    var left = 0
+    var right = 0
+    var edits = 0
+    while left < first.count && right < second.count {
+        if first[left] == second[right] {
+            left += 1
+            right += 1
+            continue
+        }
+        edits += 1
+        if edits > allowed { return nil }
+        if first.count >= second.count { left += 1 }
+        if second.count >= first.count { right += 1 }
+    }
+    edits += (first.count - left) + (second.count - right)
+    return edits <= allowed ? edits : nil
+}
+
 private func selectedTextAtFocus(_ hint: String, anchor: String,
                                  focusLine: String, focusWordIndex: Int) -> String? {
-    guard hint.count <= 200 else { return nil }
-    let selected = clipboardWords(hint)
-    var visible = clipboardWords(focusLine)
-    let focus = clipboardWords(anchor)
-    guard focus.count == 1, selected.contains(focus[0]),
-          visible.indices.contains(focusWordIndex) else {
-        return nil
+    guard hint.count <= 400 else { return nil }
+    let selected = clipboardWords(hint).map(foldedLetters)
+    let visible = clipboardWords(focusLine).map(foldedLetters)
+    guard selected.count > 1, visible.indices.contains(focusWordIndex),
+          !visible[focusWordIndex].isEmpty else { return nil }
+    // Clipboard words are authoritative for a copied selection. Vision may
+    // join "Thanks again" into "Thanksagain" or misread one nearby letter.
+    var selectedStarts = [Int]()
+    var selectedEnd = 0
+    for word in selected {
+        selectedStarts.append(selectedEnd)
+        selectedEnd += word.count
     }
-    let rawFocus = visible[focusWordIndex]
-    guard rawFocus == focus[0] || oneMissingCharacter(focus[0], rawFocus) else {
-        return nil
-    }
-    visible[focusWordIndex] = focus[0]
-    // One copied word keeps the contextual focal translation. A fragment such as
-    // “ne” remains OCR evidence for “one”, never an independent translation.
-    guard selected.count > 1 else { return nil }
-    // OCR far from the focus can be noisy (emoji and selected text are common).
-    // Compare the focus and up to two words on each side on this exact row.
-    // The third word still disambiguates nearby "before the ..." lines.
-    for selectedIndex in selected.indices where selected[selectedIndex] == focus[0] {
-        var matched = 0
-        var conflict = false
-        let local = max(0, selectedIndex - 2)...min(selected.count - 1,
-                                                    selectedIndex + 2)
-        for index in local {
-            let rowIndex = focusWordIndex + index - selectedIndex
-            guard visible.indices.contains(rowIndex) else { continue }
-            if selected[index] != visible[rowIndex] {
-                conflict = true
-                break
+    let source = selected.flatMap { $0 }
+    let focus = visible[focusWordIndex]
+    let firstRow = max(0, focusWordIndex - 2)
+    let lastRow = min(visible.count - 1, focusWordIndex + 2)
+    for first in selected.indices {
+        for last in first..<min(selected.count, first + 4) {
+            let start = selectedStarts[first]
+            let end = selectedStarts[last] + selected[last].count
+            guard let focusCost = oneEditCost(focus, Array(source[start..<end])) else {
+                continue
             }
-            matched += 1
+            var lower = start
+            var upper = end
+            var edits = focusCost
+            var conflict = false
+            for rowIndex in firstRow...lastRow where rowIndex != focusWordIndex {
+                let rowWord = visible[rowIndex]
+                let mappedStart: Int
+                if rowIndex < focusWordIndex {
+                    let distance = visible[rowIndex..<focusWordIndex]
+                        .reduce(0) { $0 + $1.count }
+                    mappedStart = start - distance
+                } else {
+                    let distance = visible[(focusWordIndex + 1)..<rowIndex]
+                        .reduce(0) { $0 + $1.count }
+                    mappedStart = end + distance
+                }
+                let mappedEnd = mappedStart + rowWord.count
+                if mappedEnd <= 0 || mappedStart >= source.count { continue }
+                guard mappedStart >= 0, mappedEnd <= source.count,
+                      let cost = oneEditCost(rowWord,
+                                             Array(source[mappedStart..<mappedEnd])) else {
+                    conflict = true
+                    break
+                }
+                edits += cost
+                if edits > 1 {
+                    conflict = true
+                    break
+                }
+                lower = min(lower, mappedStart)
+                upper = max(upper, mappedEnd)
+            }
+            if conflict { continue }
+            let matchedWords = selected.indices.filter {
+                selectedStarts[$0] >= lower &&
+                    selectedStarts[$0] + selected[$0].count <= upper
+            }.count
+            if matchedWords >= 2 { return hint }
         }
-        if !conflict && matched >= 2 { return hint }
     }
     return nil
 }
