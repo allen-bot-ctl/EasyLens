@@ -1615,30 +1615,25 @@ private final class EyeLensView: NSView {
         upperLid.lineWidth = 0.75
         NSColor(calibratedWhite: 0.96, alpha: 0.22).setStroke()
         upperLid.stroke()
-        let cornerTip = CGPoint(x: eyeRect.maxX - 6, y: eyeRect.midY - 3)
-        let cornerLines: [(CGPoint, CGPoint, CGPoint, CGPoint, CGFloat)] = [
-            (CGPoint(x: center.x + irisRadiusX * 0.58, y: center.y + irisRadiusY * 0.61),
-             CGPoint(x: center.x + irisRadiusX * 0.74, y: center.y + irisRadiusY * 0.57),
-             CGPoint(x: eyeRect.maxX - 16, y: center.y + irisRadiusY * 0.18),
-             CGPoint(x: cornerTip.x - 2, y: cornerTip.y + 2), 0.14),
-            (CGPoint(x: center.x + irisRadiusX * 0.71, y: center.y + irisRadiusY * 0.38),
-             CGPoint(x: center.x + irisRadiusX * 0.84, y: center.y + irisRadiusY * 0.38),
-             CGPoint(x: eyeRect.maxX - 13, y: center.y + irisRadiusY * 0.08),
-             CGPoint(x: cornerTip.x - 1, y: cornerTip.y + 1), 0.11),
-            (CGPoint(x: center.x + irisRadiusX * 0.83, y: center.y + irisRadiusY * 0.16),
-             CGPoint(x: center.x + irisRadiusX * 0.91, y: center.y + irisRadiusY * 0.16),
-             CGPoint(x: eyeRect.maxX - 11, y: center.y + irisRadiusY * 0.02),
-             cornerTip, 0.09)
-        ]
+        // Fine folds shorten evenly toward the right tip, clear of the lower accent.
         context.saveGState()
         eye.addClip()
-        for (start, control1, control2, end, alpha) in cornerLines {
+        for index in 0..<6 {
+            let progress = CGFloat(index) / 5
+            let start = CGPoint(x: center.x + irisRadiusX * (0.53 + 0.37 * progress),
+                                y: center.y + irisRadiusY * (0.68 - 0.57 * progress))
+            let end = CGPoint(x: eyeRect.maxX - 2 * CGFloat(index),
+                              y: eyeRect.midY + 2 + 0.6 * CGFloat(index))
+            let dx = end.x - start.x
+            let dy = start.y - end.y
             let line = NSBezierPath()
             line.move(to: start)
-            line.curve(to: end, controlPoint1: control1, controlPoint2: control2)
+            line.curve(to: end,
+                       controlPoint1: CGPoint(x: start.x + dx * 0.32, y: start.y - dy * 0.08),
+                       controlPoint2: CGPoint(x: end.x - dx * 0.22, y: end.y + dy * 0.23))
             line.lineWidth = 0.55
             line.lineCapStyle = .round
-            NSColor(calibratedWhite: 0.96, alpha: alpha).setStroke()
+            NSColor(calibratedWhite: 0.96, alpha: 0.16 - 0.014 * CGFloat(index)).setStroke()
             line.stroke()
         }
         context.restoreGState()
