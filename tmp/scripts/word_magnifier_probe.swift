@@ -1591,10 +1591,22 @@ private final class EyeLensView: NSView {
         pupilEdge.lineWidth = 0.8
         NSColor(calibratedWhite: 0.92, alpha: 0.28).setStroke()
         pupilEdge.stroke()
+        let lowerLid = NSBezierPath()
+        lowerLid.move(to: CGPoint(x: center.x + irisRadiusX * 0.38,
+                                  y: center.y - irisRadiusY * 0.70))
+        lowerLid.curve(to: CGPoint(x: center.x + irisRadiusX * 0.86,
+                                   y: center.y - irisRadiusY * 0.22),
+                       controlPoint1: CGPoint(x: center.x + irisRadiusX * 0.56,
+                                              y: center.y - irisRadiusY * 0.64),
+                       controlPoint2: CGPoint(x: center.x + irisRadiusX * 0.75,
+                                              y: center.y - irisRadiusY * 0.39))
+        lowerLid.lineWidth = 0.75
+        NSColor(calibratedWhite: 0.96, alpha: 0.22).setStroke()
+        lowerLid.stroke()
         // Two quiet neutral strokes keep the contour legible on both light and
         // dark content without turning the gaze target into a persistent badge.
         eye.lineWidth = 1.8
-        NSColor(calibratedWhite: 0.02, alpha: 0.28).setStroke()
+        NSColor(calibratedWhite: 0.02, alpha: 0.16).setStroke()
         eye.stroke()
         eye.lineWidth = 0.8
         NSColor(calibratedWhite: 0.96, alpha: 0.45).setStroke()
