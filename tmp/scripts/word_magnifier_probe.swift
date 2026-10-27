@@ -1588,8 +1588,12 @@ private final class EyeLensView: NSView {
         context.restoreGState()
 
         let pupilEdge = NSBezierPath(ovalIn: pupil)
-        pupilEdge.lineWidth = 0.8
-        NSColor(calibratedWhite: 0.92, alpha: 0.28).setStroke()
+        pupilEdge.lineWidth = hasTranslation ? 1.2 : 0.8
+        if hasTranslation {
+            NSColor.systemYellow.withAlphaComponent(0.72).setStroke()
+        } else {
+            NSColor(calibratedWhite: 0.92, alpha: 0.28).setStroke()
+        }
         pupilEdge.stroke()
         let lowerLid = NSBezierPath()
         lowerLid.move(to: CGPoint(x: center.x + irisRadiusX * 0.38,
@@ -1640,18 +1644,13 @@ private final class EyeLensView: NSView {
             line.stroke()
         }
         context.restoreGState()
-        // Keep the resting contour barely visible; the yellow stroke marks lock-on.
+        // The outer contour stays decorative; lock-on is shown at the clear center.
         eye.lineWidth = 1.8
         NSColor(calibratedWhite: 0.02, alpha: 0.02).setStroke()
         eye.stroke()
         eye.lineWidth = 0.8
         NSColor(calibratedWhite: 0.96, alpha: 0.02).setStroke()
         eye.stroke()
-        if hasTranslation {
-            eye.lineWidth = 1.4
-            NSColor.systemYellow.withAlphaComponent(0.84).setStroke()
-            eye.stroke()
-        }
         let lampCenter = CGPoint(x: eyeRect.minX + 13,
                                  y: eyeRect.midY - 2)
         let breath = (1 + sin(uptime() * .pi * 2 / 2.2)) / 2
