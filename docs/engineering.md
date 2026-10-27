@@ -11,6 +11,8 @@
 | `SelectionReader.swift` | 从目标应用读取实时选区及指针命中几何。 |
 | `FocusOCR.swift`、`FocusText.swift` | Vision OCR、焦点词定位、英文判断、上下文与结果推导。 |
 | `LocalTranslation.swift` | Translation 框架的单词与选区翻译桥接。 |
+| `DeepSeekTranslation.swift` | DeepSeek Chat Completions 请求及响应解析。 |
+| `TranslationSettings.swift` | 翻译来源、接口地址、模型与钥匙串密钥，以及设置窗口。 |
 | `TranslationLanguageSetup.swift` | 英中资源就绪检查、首次使用引导、系统下载请求。 |
 | `EyeLensView.swift` | 透明眼睛和识别成功状态的绘制。 |
 | `EasyLensAppDelegate.swift` | 菜单栏、快捷键、屏幕捕获、异步调度与结果展示。 |
@@ -20,9 +22,9 @@
 
 ## 首次使用与权限
 
-启动时查询英语到简体中文的系统翻译语言状态。未安装时打开 EasyLens 说明窗口；用户点击「下载语言」后调用 `TranslationSession.prepareTranslation()`，macOS 显示下载确认窗口。EasyLens 定期复查，资源就绪后恢复翻译；用户可从菜单栏重新打开说明。下载中或不可用时不会发起翻译请求。系统资源由 macOS 管理，应用不自行下载语言包。
+使用本地翻译时查询英语到简体中文的系统翻译语言状态。未安装时打开 EasyLens 说明窗口；用户点击「下载语言」后调用 `TranslationSession.prepareTranslation()`，macOS 显示下载确认窗口。EasyLens 定期复查，资源就绪后恢复翻译；用户可从菜单栏重新打开说明。下载中或不可用时不会发起翻译请求。系统资源由 macOS 管理，应用不自行下载语言包。
 
-屏幕画面由 ScreenCaptureKit 读取，选区辅助使用 Accessibility。首次唤醒时若录屏未授权，EasyLens 先说明用途并提供系统授权入口；权限就绪前不启动捕获，避免反复触发原生权限弹窗。若 macOS 的录屏应用列表没有 EasyLens，可以点击列表底部“＋”，在文件选择窗口用 ⇧⌘G 输入引导窗口展示的 `.app` 完整路径并添加；系统可能要求退出并重新打开应用。辅助功能未授权时另行说明完整选区翻译的依赖。菜单栏持续显示两项授权状态。读取选区时记录最近激活的外部应用，避免权限说明窗口或菜单栏短暂激活 EasyLens 时把自身误作目标。仅辅助功能权限不足时仍可单词翻译。应用不保存截图、不发送云端翻译请求。
+屏幕画面由 ScreenCaptureKit 读取，选区辅助使用 Accessibility。首次唤醒时若录屏未授权，EasyLens 先说明用途并提供系统授权入口；权限就绪前不启动捕获，避免反复触发原生权限弹窗。若 macOS 的录屏应用列表没有 EasyLens，可以点击列表底部“＋”，在文件选择窗口用 ⇧⌘G 输入引导窗口展示的 `.app` 完整路径并添加；系统可能要求退出并重新打开应用。辅助功能未授权时另行说明完整选区翻译的依赖。菜单栏持续显示两项授权状态。读取选区时记录最近激活的外部应用，避免权限说明窗口或菜单栏短暂激活 EasyLens 时把自身误作目标。仅辅助功能权限不足时仍可单词翻译。应用不保存或发送截图。选择 DeepSeek 时，焦点词及句子上下文或完整选区会发送至所配置的 HTTPS 接口；切换来源会清除翻译缓存并使旧请求失效。API Key 存在 macOS 钥匙串，非敏感设置存在 UserDefaults。
 
 ## 构建与检查
 
@@ -34,7 +36,7 @@ sh scripts/run-app.sh --show-on-launch
 EASYLENS_BUILD_CONFIGURATION=release sh scripts/build-app.sh
 ```
 
-迁移检查已覆盖：Debug/Release 编译、英文与非英文门控、过期选区不覆盖当前焦点、相对时间表达、`.app` 的 `Info.plist`、菜单栏 accessory 激活策略、实际屏幕捕获和本地英译中。缺少语言资源的窗口可在 Debug 构建中通过 `--preview-language-setup` 预览；本机已有资源，因此未实测真实首次下载与安装完成时序。
+迁移检查已覆盖：Debug/Release 编译、英文与非英文门控、过期选区不覆盖当前焦点、相对时间表达、`.app` 的 `Info.plist`、菜单栏 accessory 激活策略、实际屏幕捕获和本地英译中。DeepSeek 请求格式及焦点词、选区正文已用模拟接口核对；真实接口调用需用户在设置中输入自己的 API Key 后验证。缺少语言资源的窗口可在 Debug 构建中通过 `--preview-language-setup` 预览；本机已有资源，因此未实测真实首次下载与安装完成时序。
 
 在 VS Code 打开的 Markdown 中，Vision 快速 OCR 曾把中文误读出 `/`，旧规则因此跳过整行，使同一行的英文词也无法定位；偶发单帧识别失败还会立即收起翻译卡。现仅遮蔽识别到的路径/文件名片段，保留相邻词，并在静止焦点下容忍一次空帧。已用该 README 的编辑器截图验证 `Renderer`、`lock` 可定位而路径本身不被选为词；固定焦点的运行检查连续命中并维持翻译卡。不同主题、字号与选区的表现仍需继续实测。
 
@@ -47,3 +49,6 @@ EASYLENS_BUILD_CONFIGURATION=release sh scripts/build-app.sh
 - [Apple：LSUIElement](https://developer.apple.com/documentation/bundleresources/information-property-list/lsuielement)：菜单栏应用不出现在 Dock。
 - [Apple：TN3127 Code Signing Requirements](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements)：解释代码身份与 TCC 授权的关系，以及临时签名的版本绑定。
 - [Apple：CGPreflightScreenCaptureAccess](https://developer.apple.com/documentation/coregraphics/cgpreflightscreencaptureaccess%28%29)：检查当前录屏授权状态。
+
+- [DeepSeek：首次调用 API](https://api-docs.deepseek.com/zh-cn/)：OpenAI 兼容接口地址、鉴权、模型名和 Chat Completions 请求。
+- [DeepSeek：思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)：翻译请求关闭默认思考模式以减少延迟。

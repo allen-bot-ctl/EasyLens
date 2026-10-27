@@ -15,6 +15,7 @@ let package = Package(
                 .linkedFramework("ImageIO"),
                 .linkedFramework("NaturalLanguage"),
                 .linkedFramework("ScreenCaptureKit"),
+                .linkedFramework("Security"),
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("Translation"),
                 .linkedFramework("Vision"),

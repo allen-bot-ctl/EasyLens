@@ -12,6 +12,11 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
     private let bridge = WordTranslationBridge()
     private let selectionBridge = SelectionTranslationBridge()
     private let languageSetup = TranslationLanguageSetup()
+    private let translationSettings = TranslationSettings()
+    private let deepSeekClient = DeepSeekTranslationClient()
+    private var settingsWindow: NSWindow?
+    private var remoteWordTask: Task<Void, Never>?
+    private var remoteSelectionTask: Task<Void, Never>?
     private var languageSetupWindow: NSWindow?
     private var languageMenuItem: NSMenuItem!
     private var languageSetupTimer: Timer?
@@ -188,6 +193,11 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
         hide.target = self
         menu.addItem(hide)
         menu.addItem(.separator())
+        let settings = NSMenuItem(title: "设置…", action: #selector(showSettings),
+                                  keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
+        menu.addItem(.separator())
         languageMenuItem = NSMenuItem(title: "检查英中翻译语言…",
                                       action: #selector(showLanguageSetup), keyEquivalent: "")
         languageMenuItem.target = self
@@ -228,10 +238,13 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         print("EASYLENS_READY ⌃⌥L toggles eye lens; Esc hides; EL◉ menu quits")
-        print("NO_CLOUD_CALLS screenshots_saved=0")
+        print("TRANSLATION_PROVIDER=\(translationSettings.provider.rawValue) screenshots_saved=0")
         fflush(stdout)
         languageSetup.onStatusChange = { [weak self] status in
             self?.languageStatusChanged(status)
+        }
+        translationSettings.onChange = { [weak self] in
+            self?.translationSettingsChanged()
         }
         #if DEBUG
         if CommandLine.arguments.contains("--preview-language-setup") {
@@ -246,17 +259,22 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startLanguageChecks() {
-        Task { await languageSetup.refresh() }
+        if translationSettings.provider == .local {
+            Task { await languageSetup.refresh() }
+        }
         languageSetupTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) {
             [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, !self.languageSetup.isReady else { return }
+                guard let self, self.translationSettings.provider == .local,
+                      !self.languageSetup.isReady else { return }
                 await self.languageSetup.refresh()
             }
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        remoteWordTask?.cancel()
+        remoteSelectionTask?.cancel()
         timer?.invalidate()
         languageSetupTimer?.invalidate()
         accessibilityTimer?.invalidate()
@@ -417,7 +435,9 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
             hasPresentedAccessibilitySetup = true
             if presentAccessibilitySetup() { return }
         }
-        Task { await languageSetup.refresh() }
+        if translationSettings.provider == .local {
+            Task { await languageSetup.refresh() }
+        }
         let pointer = fixedPoint ?? NSEvent.mouseLocation
         let pasteboard = NSPasteboard.general
         pasteboardChangeCount = pasteboard.changeCount
@@ -461,6 +481,8 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func hide() {
         guard panel.isVisible else { return }
+        remoteWordTask?.cancel()
+        remoteSelectionTask?.cancel()
         generation += 1
         timer?.invalidate()
         timer = nil
@@ -486,6 +508,45 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit() { NSApp.terminate(nil) }
 
+    @objc private func showSettings() {
+        if settingsWindow == nil {
+            let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 520, height: 430),
+                                  styleMask: [.titled, .closable], backing: .buffered,
+                                  defer: false)
+            window.title = "EasyLens · 设置"
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: TranslationSettingsView(
+                settings: translationSettings, onDismiss: { [weak self] in
+                    self?.settingsWindow?.orderOut(nil)
+                }))
+            window.center()
+            settingsWindow = window
+        }
+        settingsWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func translationSettingsChanged() {
+        remoteWordTask?.cancel()
+        remoteSelectionTask?.cancel()
+        generation += 1
+        selectionRequestID += 1
+        pendingTranslationKey = nil
+        pendingSelectionText = nil
+        translationCache.removeAll()
+        selectionCache.removeAll()
+        translationPanel.orderOut(nil)
+        showingSelectionCard = false
+        currentSentence = nil
+        currentAnchor = nil
+        inspectedGeneration = -1
+        nextInspectionAt = 0
+        view.hasTranslation = false
+        if translationSettings.provider == .local {
+            Task { await languageSetup.refresh() }
+        }
+    }
+
     private func languageStatusChanged(_ status: TranslationLanguageSetup.Status) {
         switch status {
         case .checking:
@@ -496,7 +557,7 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
             nextInspectionAt = 0
         case .needsDownload:
             languageMenuItem.title = "下载英中翻译语言…"
-            if !hasPresentedLanguageSetup {
+            if translationSettings.provider == .local && !hasPresentedLanguageSetup {
                 hasPresentedLanguageSetup = true
                 showLanguageSetup()
             }
@@ -504,7 +565,7 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
             languageMenuItem.title = "英中翻译语言下载中…"
         case .unsupported:
             languageMenuItem.title = "英中翻译语言不可用…"
-            if !hasPresentedLanguageSetup {
+            if translationSettings.provider == .local && !hasPresentedLanguageSetup {
                 hasPresentedLanguageSetup = true
                 showLanguageSetup()
             }
@@ -690,11 +751,13 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
                stillSelected {
                 showSelectionCard(translated, pointer: fixedPoint ?? NSEvent.mouseLocation)
             }
-            print(String(format: "SELECTION_TRANSLATION translatedMs=%.1f resolved=yes sourceLength=%d targetLength=%d cloudCalls=0",
-                         elapsed, source.count, translated.count))
+            print(String(format: "SELECTION_TRANSLATION translatedMs=%.1f resolved=yes sourceLength=%d targetLength=%d provider=%@",
+                         elapsed, source.count, translated.count, translationSettings.provider.rawValue))
         case .failure(let error):
             print("SELECTION_TRANSLATION_ERROR=\(error)")
-            Task { await languageSetup.refresh() }
+            if translationSettings.provider == .local {
+                Task { await languageSetup.refresh() }
+            }
             endClipboardHint(reason: "selection-translation-error")
             inspectedGeneration = -1
             nextInspectionAt = 0
@@ -739,13 +802,36 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
         if let selected, let cached = selectionCache[selected] {
             showSelectionCard(cached, pointer: pointer)
         } else if let selected, pendingSelectionText != selected {
-            guard languageSetup.isReady else { return true }
+            guard translationSettings.provider == .deepSeek || languageSetup.isReady else {
+                return true
+            }
             translationPanel.orderOut(nil)
             showingSelectionCard = false
             selectionRequestID += 1
             pendingSelectionText = selected
-            selectionBridge.translate(selected, requestID: selectionRequestID)
-            print("SELECTION_TRANSLATION requested length=\(selected.count) cloudCalls=0")
+            if translationSettings.provider == .deepSeek {
+                let requestID = selectionRequestID
+                do {
+                    let configuration = try translationSettings.deepSeekConfiguration()
+                    remoteSelectionTask?.cancel()
+                    remoteSelectionTask = Task {
+                        let start = uptime()
+                        do {
+                            let result = try await deepSeekClient.translateSelection(
+                                selected, configuration: configuration)
+                            receiveSelectionTranslation(requestID: requestID,
+                                                        result: .success((result, ms(start))))
+                        } catch where !Task.isCancelled {
+                            receiveSelectionTranslation(requestID: requestID, result: .failure(error))
+                        } catch {}
+                    }
+                } catch {
+                    receiveSelectionTranslation(requestID: requestID, result: .failure(error))
+                }
+            } else {
+                selectionBridge.translate(selected, requestID: selectionRequestID)
+            }
+            print("SELECTION_TRANSLATION requested length=\(selected.count) provider=\(translationSettings.provider.rawValue)")
         } else if selected == nil {
             translationPanel.orderOut(nil)
             showingSelectionCard = false
@@ -806,6 +892,7 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
             panel.setFrame(nextFrame, display: true)
         }
         if hypot(pointer.x - lastPointer.x, pointer.y - lastPointer.y) >= 3 {
+            remoteWordTask?.cancel()
             lastPointer = pointer
             lastMoveAt = uptime()
             generation += 1
@@ -982,7 +1069,8 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
                 showingSelectionCard = false
             }
             let cacheKey = passage.anchor.lowercased() + "\n" + passage.sentence
-            if let literal = passage.literalTranslation {
+            if translationSettings.provider == .local,
+               let literal = passage.literalTranslation {
                 let translation = FocusedTranslation(chinese: literal, basis: "时间表达")
                 translationCache[cacheKey] = translation
                 showFocusCard(literal, anchor: passage.anchor,
@@ -999,17 +1087,42 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
                 print("FOCUS_TRANSLATION cacheHit=true resolved=\(cached.chinese != nil) basis=\(cached.basis) cloudCalls=0")
                 fflush(stdout)
             } else if pendingTranslationKey != cacheKey {
-                guard languageSetup.isReady else { return }
+                guard translationSettings.provider == .deepSeek || languageSetup.isReady else {
+                    return
+                }
                 pendingTranslationKey = cacheKey
-                bridge.translate(anchor: passage.anchor, sentence: passage.sentence,
-                                 maskedSentence: passage.maskedSentence,
-                                 localContext: passage.localContext,
-                                 maskedLocalContext: passage.maskedLocalContext,
-                                 microContext: passage.microContext,
-                                 maskedMicroContext: passage.maskedMicroContext,
-                                 prefixContext: passage.prefixContext,
-                                 maskedPrefixContext: passage.maskedPrefixContext,
-                                 generation: generation)
+                if translationSettings.provider == .deepSeek {
+                    do {
+                        let configuration = try translationSettings.deepSeekConfiguration()
+                        let requestGeneration = generation
+                        remoteWordTask?.cancel()
+                        remoteWordTask = Task {
+                            let start = uptime()
+                            do {
+                                let result = try await deepSeekClient.translateWord(
+                                    anchor: passage.anchor, sentence: passage.sentence,
+                                    configuration: configuration)
+                                receiveTranslation(generation: requestGeneration,
+                                                   result: .success((result, ms(start))))
+                            } catch where !Task.isCancelled {
+                                receiveTranslation(generation: requestGeneration,
+                                                   result: .failure(error))
+                            } catch {}
+                        }
+                    } catch {
+                        receiveTranslation(generation: generation, result: .failure(error))
+                    }
+                } else {
+                    bridge.translate(anchor: passage.anchor, sentence: passage.sentence,
+                                     maskedSentence: passage.maskedSentence,
+                                     localContext: passage.localContext,
+                                     maskedLocalContext: passage.maskedLocalContext,
+                                     microContext: passage.microContext,
+                                     maskedMicroContext: passage.maskedMicroContext,
+                                     prefixContext: passage.prefixContext,
+                                     maskedPrefixContext: passage.maskedPrefixContext,
+                                     generation: generation)
+                }
             }
         } catch {
             if current == generation {
@@ -1042,12 +1155,14 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 translationPanel.orderOut(nil)
             }
-            print(String(format: "FOCUS_TRANSLATION translatedMs=%.1f resolved=%@ basis=%@ cloudCalls=0",
+            print(String(format: "FOCUS_TRANSLATION translatedMs=%.1f resolved=%@ basis=%@ provider=%@",
                          elapsed, translation.chinese == nil ? "no" : "yes",
-                         translation.basis))
+                         translation.basis, translationSettings.provider.rawValue))
         case .failure(let error):
             print("SENTENCE_TRANSLATION_ERROR=\(error)")
-            Task { await languageSetup.refresh() }
+            if translationSettings.provider == .local {
+                Task { await languageSetup.refresh() }
+            }
             if translationFailures == 0 {
                 translationFailures = 1
                 inspectedGeneration = -1
