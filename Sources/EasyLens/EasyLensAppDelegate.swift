@@ -8,6 +8,11 @@ import SwiftUI
 
 @MainActor
 final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
+    private enum RemoteLoading {
+        case word(generation: Int, key: String, anchor: String)
+        case selection(requestID: Int, text: String)
+    }
+
     private let lensSize = CGSize(width: 190, height: 114)
     private let bridge = WordTranslationBridge()
     private let selectionBridge = SelectionTranslationBridge()
@@ -72,6 +77,10 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
     private var pendingSelectionText: String?
     private var selectionCache: [String: String] = [:]
     private var showingSelectionCard = false
+    private var remoteLoading: RemoteLoading?
+    private var remoteLoadingAfter = 0.0
+    private var isLoadingCard = false
+    private var loadingDots: [CALayer] = []
     private var lastSelectionDiagnostic: String?
     private var fixedPoint: CGPoint? {
         let args = CommandLine.arguments
@@ -465,6 +474,7 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
         currentFocusLine = nil
         currentFocusWordIndex = nil
         pendingTranslationKey = nil
+        finishRemoteLoading(keepCard: false)
         translationPanel.orderOut(nil)
         view.hasTranslation = false
         nextBreathFrameAt = 0
@@ -483,6 +493,7 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
         guard panel.isVisible else { return }
         remoteWordTask?.cancel()
         remoteSelectionTask?.cancel()
+        finishRemoteLoading(keepCard: false)
         generation += 1
         timer?.invalidate()
         timer = nil
@@ -529,6 +540,7 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
     private func translationSettingsChanged() {
         remoteWordTask?.cancel()
         remoteSelectionTask?.cancel()
+        finishRemoteLoading(keepCard: false)
         generation += 1
         selectionRequestID += 1
         pendingTranslationKey = nil
@@ -650,9 +662,96 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
         fflush(stdout)
     }
 
+    private func beginRemoteLoading(_ loading: RemoteLoading) {
+        finishRemoteLoading(keepCard: false)
+        translationPanel.orderOut(nil)
+        view.hasTranslation = false
+        remoteLoading = loading
+        remoteLoadingAfter = uptime() + 0.18
+    }
+
+    private func finishRemoteLoading(keepCard: Bool) {
+        remoteLoading = nil
+        for dot in loadingDots { dot.removeFromSuperlayer() }
+        loadingDots.removeAll()
+        translationPanel.contentView?.layer?.removeAnimation(forKey: "loadingAppear")
+        if isLoadingCard && !keepCard { translationPanel.orderOut(nil) }
+        isLoadingCard = false
+    }
+
+    private func showRemoteLoadingIfNeeded(at pointer: CGPoint, now: Double) {
+        guard !isLoadingCard, now >= remoteLoadingAfter,
+              let loading = remoteLoading else { return }
+        let title: String
+        switch loading {
+        case .word(let requestGeneration, let key, let anchor):
+            guard requestGeneration == generation,
+                  pendingTranslationKey == key, currentAnchor == anchor else {
+                finishRemoteLoading(keepCard: false)
+                return
+            }
+            title = anchor
+        case .selection(let requestID, let text):
+            guard requestID == selectionRequestID, pendingSelectionText == text,
+                  activeSelectionHint == text else {
+                finishRemoteLoading(keepCard: false)
+                return
+            }
+            title = "完整选区"
+        }
+        showLoadingCard(title: title, pointer: pointer)
+    }
+
+    private func showLoadingCard(title: String, pointer: CGPoint) {
+        guard let screen = screen(at: pointer), let card = translationPanel.contentView else { return }
+        let width = min(CGFloat(320), max(CGFloat(210), CGFloat(title.count) * 8 + 90))
+        let height: CGFloat = 76
+        translationPanel.setContentSize(CGSize(width: width, height: height))
+        card.frame = CGRect(x: 0, y: 0, width: width, height: height)
+        wordLabel.stringValue = title
+        wordLabel.frame = CGRect(x: 16, y: 48, width: width - 32, height: 18)
+        contextLabel.font = .systemFont(ofSize: 15, weight: .medium)
+        contextLabel.textColor = NSColor(calibratedWhite: 0.88, alpha: 1)
+        contextLabel.stringValue = "正在转译"
+        contextLabel.frame = CGRect(x: 16, y: 11, width: 94, height: 30)
+        for index in 0..<3 {
+            let dot = CALayer()
+            dot.frame = CGRect(x: 114 + CGFloat(index) * 12, y: 24,
+                               width: 4, height: 4)
+            dot.cornerRadius = 2
+            dot.backgroundColor = NSColor(calibratedWhite: 0.92, alpha: 1).cgColor
+            dot.opacity = 0.22
+            let pulse = CAKeyframeAnimation(keyPath: "opacity")
+            pulse.values = [0.22, 0.9, 0.22]
+            pulse.keyTimes = [0, 0.5, 1]
+            pulse.duration = 1.15
+            pulse.beginTime = CACurrentMediaTime() + Double(index) * 0.16
+            pulse.repeatCount = .infinity
+            dot.add(pulse, forKey: "pulse")
+            card.layer?.addSublayer(dot)
+            loadingDots.append(dot)
+        }
+        let eyeFrame = panel.frame
+        let x = max(screen.frame.minX + 6,
+                    min(eyeFrame.midX - width / 2, screen.frame.maxX - width - 6))
+        let below = eyeFrame.minY - height - 8
+        let y = below >= screen.frame.minY + 6 ? below :
+            min(eyeFrame.maxY + 8, screen.frame.maxY - height - 6)
+        translationPanel.setFrameOrigin(CGPoint(x: x, y: y))
+        let appear = CABasicAnimation(keyPath: "opacity")
+        appear.fromValue = 0
+        appear.toValue = 1
+        appear.duration = 0.14
+        card.layer?.add(appear, forKey: "loadingAppear")
+        isLoadingCard = true
+        translationPanel.orderFrontRegardless()
+        view.hasTranslation = false
+    }
+
     private func showFocusCard(_ chinese: String, anchor: String, basis: String,
                                pointer: CGPoint) {
         guard let screen = screen(at: pointer) else { return }
+        finishRemoteLoading(keepCard: true)
         showingSelectionCard = false
         let width: CGFloat = min(min(420, screen.frame.width - 12),
             max(180, CGFloat(max(anchor.count + basis.count, chinese.count)) * 15 + 36))
@@ -663,6 +762,7 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [.font: font]).height
         contextLabel.font = font
+        contextLabel.textColor = .white
         contextLabel.stringValue = chinese
         let cellHeight = contextLabel.cell?.cellSize(
             forBounds: CGRect(x: 0, y: 0, width: contentWidth, height: 10000)).height ?? 0
@@ -686,6 +786,7 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
 
     private func showSelectionCard(_ chinese: String, pointer: CGPoint) {
         guard let screen = screen(at: pointer) else { return }
+        finishRemoteLoading(keepCard: true)
         showingSelectionCard = true
         let width: CGFloat = min(420, max(250, screen.frame.width - 12))
         let contentWidth = width - 32
@@ -695,6 +796,7 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [.font: font]).height
         contextLabel.font = font
+        contextLabel.textColor = .white
         contextLabel.stringValue = chinese
         let cellHeight = contextLabel.cell?.cellSize(
             forBounds: CGRect(x: 0, y: 0, width: contentWidth, height: 10000)).height ?? 0
@@ -726,6 +828,7 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
         case .success(let (chinese, elapsed)):
             let translated = chinese.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !translated.isEmpty else {
+                finishRemoteLoading(keepCard: false)
                 endClipboardHint(reason: "empty-selection-translation")
                 inspectedGeneration = -1
                 nextInspectionAt = 0
@@ -750,10 +853,13 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
             if panel.isVisible, activeSelectionHint == source,
                stillSelected {
                 showSelectionCard(translated, pointer: fixedPoint ?? NSEvent.mouseLocation)
+            } else {
+                finishRemoteLoading(keepCard: false)
             }
             print(String(format: "SELECTION_TRANSLATION translatedMs=%.1f resolved=yes sourceLength=%d targetLength=%d provider=%@",
                          elapsed, source.count, translated.count, translationSettings.provider.rawValue))
         case .failure(let error):
+            finishRemoteLoading(keepCard: false)
             print("SELECTION_TRANSLATION_ERROR=\(error)")
             if translationSettings.provider == .local {
                 Task { await languageSetup.refresh() }
@@ -813,6 +919,7 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
                 let requestID = selectionRequestID
                 do {
                     let configuration = try translationSettings.deepSeekConfiguration()
+                    beginRemoteLoading(.selection(requestID: requestID, text: selected))
                     remoteSelectionTask?.cancel()
                     remoteSelectionTask = Task {
                         let start = uptime()
@@ -833,6 +940,7 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
             }
             print("SELECTION_TRANSLATION requested length=\(selected.count) provider=\(translationSettings.provider.rawValue)")
         } else if selected == nil {
+            finishRemoteLoading(keepCard: false)
             translationPanel.orderOut(nil)
             showingSelectionCard = false
         }
@@ -893,6 +1001,7 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
         }
         if hypot(pointer.x - lastPointer.x, pointer.y - lastPointer.y) >= 3 {
             remoteWordTask?.cancel()
+            finishRemoteLoading(keepCard: false)
             lastPointer = pointer
             lastMoveAt = uptime()
             generation += 1
@@ -909,8 +1018,9 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
             view.isReading = false
         }
         let now = uptime()
+        showRemoteLoadingIfNeeded(at: pointer, now: now)
         let success = now - lastMoveAt >= 0.10 && translationPanel.isVisible &&
-            translationPanel.alphaValue > 0.5 &&
+            translationPanel.alphaValue > 0.5 && !isLoadingCard &&
             (showingSelectionCard || currentAnchor != nil)
         if view.hasTranslation != success { view.hasTranslation = success }
         if now >= nextBreathFrameAt {
@@ -952,6 +1062,7 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             if activeSelectionSource == "accessibility" {
+                finishRemoteLoading(keepCard: false)
                 activeSelectionHint = nil
                 activeSelectionSource = "none"
                 selectionRequestID += 1
@@ -998,6 +1109,7 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
             let source = "none"
             let selectionHint: String? = nil
             if activeSelectionHint != selectionHint || activeSelectionSource != source {
+                finishRemoteLoading(keepCard: false)
                 selectionRequestID += 1
                 pendingSelectionText = nil
                 activeSelectionHint = selectionHint
@@ -1021,6 +1133,7 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
                 // translated word blink out between two successful scans.
                 consecutiveMisses += 1
                 if currentSentence != nil, consecutiveMisses >= 2 {
+                    finishRemoteLoading(keepCard: false)
                     generation += 1
                     currentSentence = nil
                     currentAnchor = nil
@@ -1046,6 +1159,7 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
             if currentAnchor != passage.anchor || currentSentence != passage.sentence {
+                finishRemoteLoading(keepCard: false)
                 generation += 1
                 pendingTranslationKey = nil
                 if currentAnchor != passage.anchor {
@@ -1095,6 +1209,8 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
                     do {
                         let configuration = try translationSettings.deepSeekConfiguration()
                         let requestGeneration = generation
+                        beginRemoteLoading(.word(generation: requestGeneration,
+                                                 key: cacheKey, anchor: passage.anchor))
                         remoteWordTask?.cancel()
                         remoteWordTask = Task {
                             let start = uptime()
@@ -1142,7 +1258,10 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
         pendingTranslationKey = nil
         if activeSelectionSource != "none" ||
            readLiveSelection(at: fixedPoint ?? NSEvent.mouseLocation,
-                             targetPID: selectionTargetPID).pointHit { return }
+                             targetPID: selectionTargetPID).pointHit {
+            finishRemoteLoading(keepCard: false)
+            return
+        }
         switch result {
         case .success(let (translation, elapsed)):
             translationFailures = 0
@@ -1153,12 +1272,14 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
                               basis: translation.basis,
                               pointer: fixedPoint ?? NSEvent.mouseLocation)
             } else {
+                finishRemoteLoading(keepCard: false)
                 translationPanel.orderOut(nil)
             }
             print(String(format: "FOCUS_TRANSLATION translatedMs=%.1f resolved=%@ basis=%@ provider=%@",
                          elapsed, translation.chinese == nil ? "no" : "yes",
                          translation.basis, translationSettings.provider.rawValue))
         case .failure(let error):
+            finishRemoteLoading(keepCard: false)
             print("SENTENCE_TRANSLATION_ERROR=\(error)")
             if translationSettings.provider == .local {
                 Task { await languageSetup.refresh() }

@@ -23,7 +23,7 @@ struct DeepSeekTranslationClient {
         let input = "目标词：\(anchor)\n句子：\(sentence)"
         let chinese = try await complete(system: instruction, user: input,
                                          configuration: configuration)
-        return FocusedTranslation(chinese: chinese, basis: "DeepSeek · 语境翻译")
+        return FocusedTranslation(chinese: chinese, basis: "语境翻译")
     }
 
     func translateSelection(_ text: String,
