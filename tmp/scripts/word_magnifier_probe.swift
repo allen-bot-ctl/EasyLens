@@ -1604,7 +1604,7 @@ private final class EyeLensView: NSView {
             NSColor.systemYellow.withAlphaComponent(0.84).setStroke()
             eye.stroke()
         }
-        let lampCenter = CGPoint(x: eyeRect.minX + 17,
+        let lampCenter = CGPoint(x: eyeRect.minX + 13,
                                  y: eyeRect.midY - 2)
         let breath = (1 + sin(uptime() * .pi * 2 / 2.2)) / 2
         NSColor.systemRed.withAlphaComponent(0.10 + 0.17 * breath).setFill()
