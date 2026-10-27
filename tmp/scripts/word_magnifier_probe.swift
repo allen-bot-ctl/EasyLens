@@ -1526,6 +1526,7 @@ private struct TranslationTaskView: View {
 @MainActor
 private final class EyeLensView: NSView {
     var isReading = false { didSet { needsDisplay = true } }
+    var hasTranslation = false { didSet { needsDisplay = true } }
 
     static func eyePath(in rect: CGRect) -> NSBezierPath {
         let left = CGPoint(x: rect.minX, y: rect.midY - 2)
@@ -1572,8 +1573,8 @@ private final class EyeLensView: NSView {
             let middleFactor = (innerFactor + outerFactor) / 2
             let bend = angle + 0.06 * sin(phase * 0.83)
             let hue = index.isMultiple(of: 4)
-                ? NSColor(calibratedRed: 0.30, green: 0.72, blue: 0.96, alpha: 0.15)
-                : NSColor(calibratedRed: 0.88, green: 0.94, blue: 1.0, alpha: 0.075)
+                ? NSColor(calibratedWhite: 0.80, alpha: 0.13)
+                : NSColor(calibratedWhite: 0.96, alpha: 0.07)
             context.setStrokeColor(hue.cgColor)
             context.setLineWidth(index.isMultiple(of: 7) ? 0.9 : 0.55)
             context.move(to: CGPoint(x: center.x + cos(angle) * irisRadiusX * innerFactor,
@@ -1588,19 +1589,30 @@ private final class EyeLensView: NSView {
 
         let pupilEdge = NSBezierPath(ovalIn: pupil)
         pupilEdge.lineWidth = 0.8
-        NSColor(calibratedRed: 0.56, green: 0.79, blue: 0.95, alpha: 0.36).setStroke()
+        NSColor(calibratedWhite: 0.92, alpha: 0.28).setStroke()
         pupilEdge.stroke()
+        // Two quiet neutral strokes keep the contour legible on both light and
+        // dark content without turning the gaze target into a persistent badge.
         eye.lineWidth = 1.8
-        (isReading ? NSColor.systemOrange : NSColor.systemBlue).withAlphaComponent(0.78).setStroke()
+        NSColor(calibratedWhite: 0.02, alpha: 0.28).setStroke()
         eye.stroke()
-        NSColor.white.withAlphaComponent(0.74).setFill()
-        NSBezierPath(ovalIn: CGRect(x: center.x - irisRadiusX * 0.72,
-                                    y: center.y + irisRadiusY * 0.53,
-                                    width: 4.6, height: 4.6)).fill()
-        NSColor.white.withAlphaComponent(0.38).setFill()
-        NSBezierPath(ovalIn: CGRect(x: center.x - irisRadiusX * 0.66,
-                                    y: center.y + irisRadiusY * 0.60,
-                                    width: 1.8, height: 1.8)).fill()
+        eye.lineWidth = 0.8
+        NSColor(calibratedWhite: 0.96, alpha: 0.45).setStroke()
+        eye.stroke()
+        if hasTranslation {
+            eye.lineWidth = 1.4
+            NSColor.systemYellow.withAlphaComponent(0.84).setStroke()
+            eye.stroke()
+        }
+        let lampCenter = CGPoint(x: eyeRect.minX + 17,
+                                 y: eyeRect.midY - 2)
+        let breath = (1 + sin(uptime() * .pi * 2 / 2.2)) / 2
+        NSColor.systemRed.withAlphaComponent(0.10 + 0.17 * breath).setFill()
+        NSBezierPath(ovalIn: CGRect(x: lampCenter.x - 7, y: lampCenter.y - 7,
+                                    width: 14, height: 14)).fill()
+        NSColor.systemRed.withAlphaComponent(0.58 + 0.35 * breath).setFill()
+        NSBezierPath(ovalIn: CGRect(x: lampCenter.x - 2.5, y: lampCenter.y - 2.5,
+                                    width: 5, height: 5)).fill()
     }
 }
 
@@ -1616,6 +1628,7 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
     private var view: EyeLensView!
     private var statusItem: NSStatusItem!
     private var timer: Timer?
+    private var nextBreathFrameAt = 0.0
     private var displays: [CGDirectDisplayID: SCDisplay] = [:]
     private var ownWindow: SCWindow?
     private var cardWindow: SCWindow?
@@ -1688,6 +1701,7 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
         frost.material = .hudWindow
         frost.blendingMode = .behindWindow
         frost.state = .active
+        frost.alphaValue = 0.58
         frost.wantsLayer = true
         let eyeRect = lensBounds.insetBy(dx: 3, dy: 3)
         let clearCenter = CGRect(x: eyeRect.midX - eyeRect.height * 0.60,
@@ -1719,8 +1733,8 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
         card.wantsLayer = true
         card.layer?.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 0.94).cgColor
         card.layer?.cornerRadius = 14
-        card.layer?.borderWidth = 1
-        card.layer?.borderColor = NSColor.systemBlue.withAlphaComponent(0.5).cgColor
+        card.layer?.borderWidth = 0.8
+        card.layer?.borderColor = NSColor(calibratedWhite: 0.9, alpha: 0.18).cgColor
         translationPanel.contentView = card
         contextLabel = NSTextField(labelWithString: "")
         contextLabel.font = .systemFont(ofSize: 16, weight: .medium)
@@ -1855,6 +1869,8 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
         currentFocusWordIndex = nil
         pendingTranslationKey = nil
         translationPanel.orderOut(nil)
+        view.hasTranslation = false
+        nextBreathFrameAt = 0
         panel.setFrame(frame(around: pointer), display: true)
         panel.orderFrontRegardless()
         registerEscape()
@@ -1873,6 +1889,7 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
         timer = nil
         panel.orderOut(nil)
         translationPanel.orderOut(nil)
+        view.hasTranslation = false
         releaseEscape()
         currentSentence = nil
         currentAnchor = nil
@@ -1950,24 +1967,34 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
 
     private func showFocusCard(_ chinese: String, anchor: String, basis: String,
                                pointer: CGPoint) {
+        guard let screen = screen(at: pointer) else { return }
         showingSelectionCard = false
-        let width: CGFloat = min(300, max(160, CGFloat(max(anchor.count + basis.count,
-                                                           chinese.count)) * 15 + 36))
-        let height: CGFloat = 72
+        let width: CGFloat = min(min(420, screen.frame.width - 12),
+            max(180, CGFloat(max(anchor.count + basis.count, chinese.count)) * 15 + 36))
         let contentWidth = width - 32
+        let font = NSFont.systemFont(ofSize: 16, weight: .medium)
+        let measured = (chinese as NSString).boundingRect(
+            with: CGSize(width: contentWidth, height: 10000),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font]).height
+        contextLabel.font = font
+        contextLabel.stringValue = chinese
+        let cellHeight = contextLabel.cell?.cellSize(
+            forBounds: CGRect(x: 0, y: 0, width: contentWidth, height: 10000)).height ?? 0
+        let textHeight = min(screen.frame.height - 120,
+                             max(30, ceil(max(measured, cellHeight)) + 12))
+        let height = textHeight + 44
         translationPanel.setContentSize(CGSize(width: width, height: height))
         translationPanel.contentView?.frame = CGRect(x: 0, y: 0, width: width, height: height)
         wordLabel.stringValue = "\(anchor) · \(basis)"
-        wordLabel.frame = CGRect(x: 16, y: 44, width: contentWidth, height: 18)
-        contextLabel.font = .systemFont(ofSize: 16, weight: .medium)
-        contextLabel.stringValue = chinese
-        contextLabel.frame = CGRect(x: 16, y: 10, width: contentWidth, height: 30)
-        guard let screen = screen(at: pointer) else { return }
+        wordLabel.frame = CGRect(x: 16, y: height - 30, width: contentWidth, height: 18)
+        contextLabel.frame = CGRect(x: 16, y: 10, width: contentWidth, height: textHeight)
         let eyeFrame = panel.frame
         let x = max(screen.frame.minX + 6,
                     min(eyeFrame.midX - width / 2, screen.frame.maxX - width - 6))
         let below = eyeFrame.minY - height - 8
-        let y = below >= screen.frame.minY + 6 ? below : eyeFrame.maxY + 8
+        let y = below >= screen.frame.minY + 6 ? below :
+            min(eyeFrame.maxY + 8, screen.frame.maxY - height - 6)
         translationPanel.setFrameOrigin(CGPoint(x: x, y: y))
         translationPanel.orderFrontRegardless()
     }
@@ -2166,6 +2193,15 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
             pendingTranslationKey = nil
             translationPanel.orderOut(nil)
             view.isReading = false
+        }
+        let now = uptime()
+        let success = now - lastMoveAt >= 0.10 && translationPanel.isVisible &&
+            translationPanel.alphaValue > 0.5 &&
+            (showingSelectionCard || currentAnchor != nil)
+        if view.hasTranslation != success { view.hasTranslation = success }
+        if now >= nextBreathFrameAt {
+            view.needsDisplay = true
+            nextBreathFrameAt = now + 1.0 / 24.0
         }
         guard !scanning, uptime() - lastMoveAt >= 0.10,
               inspectedGeneration != generation, uptime() >= nextInspectionAt,
