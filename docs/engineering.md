@@ -36,6 +36,8 @@ EASYLENS_BUILD_CONFIGURATION=release sh scripts/build-app.sh
 
 迁移检查已覆盖：Debug/Release 编译、英文与非英文门控、过期选区不覆盖当前焦点、相对时间表达、`.app` 的 `Info.plist`、菜单栏 accessory 激活策略、实际屏幕捕获和本地英译中。缺少语言资源的窗口可在 Debug 构建中通过 `--preview-language-setup` 预览；本机已有资源，因此未实测真实首次下载与安装完成时序。
 
+在 VS Code 打开的 Markdown 中，Vision 快速 OCR 曾把中文误读出 `/`，旧规则因此跳过整行，使同一行的英文词也无法定位；偶发单帧识别失败还会立即收起翻译卡。现仅遮蔽识别到的路径/文件名片段，保留相邻词，并在静止焦点下容忍一次空帧。已用该 README 的编辑器截图验证 `Renderer`、`lock` 可定位而路径本身不被选为词；固定焦点的运行检查连续命中并维持翻译卡。不同主题、字号与选区的表现仍需继续实测。
+
 当前仍是本地开发工程。本地自签名证书只用于保持开发机上的代码身份，不能用于正式分发或公证。从旧的临时签名切换后，已有的授权记录可能对应旧代码身份；可分别运行 `tccutil reset Accessibility ai.nangua.EasyLens` 与 `tccutil reset ScreenCapture ai.nangua.EasyLens` 清除旧记录，再用新构建授权一次。分发前需要正式签名与公证、安装与升级机制，以及在不同 macOS 版本和目标应用上的权限与选区回归测试。
 
 ## 系统接口依据

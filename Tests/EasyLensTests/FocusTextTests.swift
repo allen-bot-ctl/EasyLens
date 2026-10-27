@@ -21,6 +21,17 @@ final class FocusTextTests: XCTestCase {
         XCTAssertEqual(relativeTimeChinese("3 hours ago"), "3小时前")
     }
 
+    func testInlinePathDoesNotHideAdjacentProseWords() {
+        let line = "tgz, vendor lock or node_modules/openclaw."
+        let cleaned = excludingInlinePaths(line)
+        XCTAssertTrue(cleaned.contains("vendor lock"))
+        XCTAssertFalse(cleaned.contains("node_modules"))
+        XCTAssertEqual((cleaned as NSString).length, (line as NSString).length)
+        XCTAssertFalse(inlinePathRanges("Renderer KP/EIFAIFX").isEmpty)
+        XCTAssertEqual(excludingInlinePaths("package.json"),
+                       String(repeating: " ", count: "package.json".count))
+    }
+
     func testMissingLanguagesRequireExplicitPreparation() async {
         await MainActor.run {
             let setup = TranslationLanguageSetup()

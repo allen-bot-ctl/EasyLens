@@ -3,6 +3,27 @@ import AppKit
 import NaturalLanguage
 import Vision
 
+// Paths and filenames can appear inside otherwise translatable prose. Exclude
+// their own glyphs, not the entire OCR row (whose Chinese text may also be
+// misread as punctuation such as '/').
+private let inlinePathRegex = try! NSRegularExpression(
+    pattern: "(?:[A-Za-z0-9_.*~-]+[\\\\/])+[A-Za-z0-9_.*~+#-]+|(?:[A-Za-z0-9_-]+\\.)+(?:app|swift|mjs|js|json|py|md|tgz|html)\\b",
+    options: [.caseInsensitive])
+
+func inlinePathRanges(_ text: String) -> [NSRange] {
+    inlinePathRegex.matches(in: text,
+                            range: NSRange(location: 0, length: (text as NSString).length))
+        .map(\.range)
+}
+
+func excludingInlinePaths(_ text: String) -> String {
+    let result = NSMutableString(string: text)
+    for range in inlinePathRanges(text).reversed() {
+        result.replaceCharacters(in: range, with: String(repeating: " ", count: range.length))
+    }
+    return result as String
+}
+
 func passageAtCenter(_ image: CGImage, focus: CGPoint,
                              debug: Bool = false,
                              accurate: Bool = false,
@@ -110,13 +131,11 @@ func passageAtCenter(_ image: CGImage, focus: CGPoint,
     if debug {
         for row in rows { print("OCR_ROW box=\(row.box) text=\(row.text)") }
     }
-    let pathRows = rows.filter { looksLikePathOrCode($0.text) }.map { $0.box.midY }
     var found: [(row: Int, anchor: String, range: NSRange,
                  distance: CGFloat, centerDistance: CGFloat,
                  literalTranslation: String?, hinted: Bool)] = []
     for (rowIndex, row) in rows.enumerated() {
-        guard !pathRows.contains(where: { abs($0 - row.box.midY) < 0.04 }),
-              !looksLikePathOrCode(row.text) else { continue }
+        let excludedRanges = inlinePathRanges(row.text)
         let rowRange = NSRange(location: 0, length: (row.text as NSString).length)
         let timeMatches = relativeTimeRegex.matches(in: row.text, range: rowRange)
         func wordBox(for range: NSRange) -> CGRect {
@@ -155,6 +174,9 @@ func passageAtCenter(_ image: CGImage, focus: CGPoint,
         }
         let matches = regex.matches(in: row.text, range: rowRange)
         for match in matches {
+            guard !excludedRanges.contains(where: {
+                NSIntersectionRange(match.range, $0).length > 0
+            }) else { continue }
             guard !timeMatches.contains(where: {
                 NSIntersectionRange(match.range, $0.range).length > 0
             }) else { continue }
@@ -235,7 +257,7 @@ func passageAtCenter(_ image: CGImage, focus: CGPoint,
     let focusedRow = rows[focused.row]
     func preservingEnglish(_ text: String) -> String {
         var result = ""
-        for scalar in text.unicodeScalars {
+        for scalar in excludingInlinePaths(text).unicodeScalars {
             if (0x3400...0x9FFF).contains(scalar.value) {
                 result += String(repeating: " ", count: scalar.utf16.count)
             } else {
@@ -347,7 +369,6 @@ func passageAtCenter(_ image: CGImage, focus: CGPoint,
         }
     }
     guard (1...60).contains(words.count), sentence.count <= 320,
-          !looksLikePathOrCode(sentence),
           !sentence.unicodeScalars.contains(where: { (0x3400...0x9FFF).contains($0.value) }) else {
         return (nil, ms(start))
     }

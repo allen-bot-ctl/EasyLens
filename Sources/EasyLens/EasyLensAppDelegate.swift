@@ -930,7 +930,10 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
                         endClipboardHint(reason: "no-visual-focus")
                     }
                 }
-                if currentSentence != nil {
+                // A single noisy editor frame should not make an already
+                // translated word blink out between two successful scans.
+                consecutiveMisses += 1
+                if currentSentence != nil, consecutiveMisses >= 2 {
                     generation += 1
                     currentSentence = nil
                     currentAnchor = nil
@@ -940,7 +943,6 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
                     translationPanel.orderOut(nil)
                     print("FOCUS_CONTENT_CHANGED target=none")
                 }
-                consecutiveMisses += 1
                 inspectedGeneration = -1
                 nextInspectionAt = uptime() + min(0.45 * pow(1.6, Double(consecutiveMisses - 1)), 2.0)
                 print(String(format: "SENTENCE_FOCUS none scanMs=%.1f ocrMs=%.1f", scanMs, ocrMs))
@@ -959,7 +961,9 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
             if currentAnchor != passage.anchor || currentSentence != passage.sentence {
                 generation += 1
                 pendingTranslationKey = nil
-                translationPanel.orderOut(nil)
+                if currentAnchor != passage.anchor {
+                    translationPanel.orderOut(nil)
+                }
                 print("FOCUS_CONTENT_CHANGED target=word")
             }
             currentSentence = passage.sentence
