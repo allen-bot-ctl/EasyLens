@@ -1618,12 +1618,12 @@ private final class EyeLensView: NSView {
         // Fine folds shorten evenly toward the right tip, clear of the lower accent.
         context.saveGState()
         eye.addClip()
-        for index in 0..<6 {
-            let progress = CGFloat(index) / 5
-            let start = CGPoint(x: center.x + irisRadiusX * (0.53 + 0.37 * progress),
-                                y: center.y + irisRadiusY * (0.68 - 0.57 * progress))
-            let end = CGPoint(x: eyeRect.maxX - 2 * CGFloat(index),
-                              y: eyeRect.midY + 2 + 0.6 * CGFloat(index))
+        for index in 0..<8 {
+            let progress = CGFloat(index) / 7
+            let start = CGPoint(x: center.x + irisRadiusX * (0.48 + 0.47 * progress),
+                                y: center.y + irisRadiusY * (0.74 - 0.90 * progress))
+            let end = CGPoint(x: eyeRect.maxX - CGFloat(index),
+                              y: eyeRect.midY + 2 - 0.7 * CGFloat(index))
             let dx = end.x - start.x
             let dy = start.y - end.y
             let line = NSBezierPath()
@@ -1631,9 +1631,9 @@ private final class EyeLensView: NSView {
             line.curve(to: end,
                        controlPoint1: CGPoint(x: start.x + dx * 0.32, y: start.y - dy * 0.08),
                        controlPoint2: CGPoint(x: end.x - dx * 0.22, y: end.y + dy * 0.23))
-            line.lineWidth = 0.55
+            line.lineWidth = 0.62
             line.lineCapStyle = .round
-            NSColor(calibratedWhite: 0.96, alpha: 0.16 - 0.014 * CGFloat(index)).setStroke()
+            NSColor(calibratedWhite: 0.96, alpha: 0.22 - 0.013 * CGFloat(index)).setStroke()
             line.stroke()
         }
         context.restoreGState()
