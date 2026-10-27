@@ -1615,6 +1615,37 @@ private final class EyeLensView: NSView {
         upperLid.lineWidth = 0.75
         NSColor(calibratedWhite: 0.96, alpha: 0.22).setStroke()
         upperLid.stroke()
+        let cornerTip = CGPoint(x: eyeRect.maxX - 8, y: eyeRect.midY + 2)
+        let cornerLines: [(CGPoint, CGPoint, CGPoint, CGPoint, CGFloat)] = [
+            (CGPoint(x: center.x + irisRadiusX * 0.55, y: center.y + irisRadiusY * 0.65),
+             CGPoint(x: center.x + irisRadiusX * 0.73, y: center.y + irisRadiusY * 0.62),
+             CGPoint(x: eyeRect.maxX - 16, y: center.y + irisRadiusY * 0.25),
+             CGPoint(x: cornerTip.x - 2, y: cornerTip.y + 1), 0.15),
+            (CGPoint(x: center.x + irisRadiusX * 0.70, y: center.y + irisRadiusY * 0.41),
+             CGPoint(x: center.x + irisRadiusX * 0.84, y: center.y + irisRadiusY * 0.39),
+             CGPoint(x: eyeRect.maxX - 14, y: center.y + irisRadiusY * 0.14),
+             CGPoint(x: cornerTip.x - 1, y: cornerTip.y), 0.12),
+            (CGPoint(x: center.x + irisRadiusX * 0.82, y: center.y + irisRadiusY * 0.12),
+             CGPoint(x: center.x + irisRadiusX * 0.90, y: center.y + irisRadiusY * 0.15),
+             CGPoint(x: eyeRect.maxX - 13, y: center.y + irisRadiusY * 0.08),
+             cornerTip, 0.09),
+            (CGPoint(x: center.x + irisRadiusX * 0.86, y: center.y - irisRadiusY * 0.22),
+             CGPoint(x: eyeRect.maxX - 16, y: center.y - irisRadiusY * 0.18),
+             CGPoint(x: eyeRect.maxX - 12, y: center.y - irisRadiusY * 0.04),
+             CGPoint(x: cornerTip.x - 1, y: cornerTip.y - 1), 0.13)
+        ]
+        context.saveGState()
+        eye.addClip()
+        for (start, control1, control2, end, alpha) in cornerLines {
+            let line = NSBezierPath()
+            line.move(to: start)
+            line.curve(to: end, controlPoint1: control1, controlPoint2: control2)
+            line.lineWidth = 0.55
+            line.lineCapStyle = .round
+            NSColor(calibratedWhite: 0.96, alpha: alpha).setStroke()
+            line.stroke()
+        }
+        context.restoreGState()
         // Keep the resting contour barely visible; the yellow stroke marks lock-on.
         eye.lineWidth = 1.8
         NSColor(calibratedWhite: 0.02, alpha: 0.02).setStroke()
