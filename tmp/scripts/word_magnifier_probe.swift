@@ -1596,10 +1596,37 @@ private final class EyeLensView: NSView {
         }
         pupilEdge.stroke()
         let eyeBallDiameter = pupil.height * 0.56
-        let eyeBall = NSBezierPath(ovalIn: CGRect(x: center.x - eyeBallDiameter / 2,
-                                                 y: center.y - eyeBallDiameter / 2,
-                                                 width: eyeBallDiameter,
-                                                 height: eyeBallDiameter))
+        let eyeBallRadius = eyeBallDiameter / 2
+        let eyeBallRect = CGRect(x: center.x - eyeBallRadius, y: center.y - eyeBallRadius,
+                                 width: eyeBallDiameter, height: eyeBallDiameter)
+        let eyeBall = NSBezierPath(ovalIn: eyeBallRect)
+        // Fine, uneven iris fibers leave the central sight line open for the source text.
+        context.saveGState()
+        eyeBall.addClip()
+        context.setLineCap(.round)
+        for index in 0..<64 {
+            let phase = CGFloat(index)
+            let angle = phase * 2 * .pi / 64 + 0.035 * sin(phase * 2.37)
+            let innerRadius = eyeBallRadius * (0.32 + 0.06 * sin(phase * 1.73))
+            let outerRadius = eyeBallRadius * (0.78 + 0.16 * sin(phase * 0.91))
+            let bend = angle + 0.09 * sin(phase * 1.19)
+            context.setStrokeColor(NSColor(calibratedRed: 0.66, green: 0.77, blue: 0.84,
+                                           alpha: index.isMultiple(of: 5) ? 0.19 : 0.10).cgColor)
+            context.setLineWidth(index.isMultiple(of: 7) ? 0.7 : 0.45)
+            context.move(to: CGPoint(x: center.x + cos(angle) * innerRadius,
+                                     y: center.y + sin(angle) * innerRadius))
+            context.addQuadCurve(to: CGPoint(x: center.x + cos(angle) * outerRadius,
+                                             y: center.y + sin(angle) * outerRadius),
+                                 control: CGPoint(x: center.x + cos(bend) * eyeBallRadius * 0.60,
+                                                  y: center.y + sin(bend) * eyeBallRadius * 0.60))
+            context.strokePath()
+        }
+        context.restoreGState()
+        let innerEye = NSBezierPath(ovalIn: eyeBallRect.insetBy(dx: eyeBallRadius * 0.73,
+                                                                 dy: eyeBallRadius * 0.73))
+        innerEye.lineWidth = 0.55
+        NSColor(calibratedWhite: 0.95, alpha: 0.16).setStroke()
+        innerEye.stroke()
         eyeBall.lineWidth = 0.7
         NSColor(calibratedWhite: 0.96, alpha: 0.16).setStroke()
         eyeBall.stroke()
