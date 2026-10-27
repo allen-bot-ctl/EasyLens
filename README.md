@@ -15,12 +15,13 @@ sh scripts/run-app.sh --show-on-launch
 构建产物为 `build/EasyLens.app`。单独构建和运行：
 
 ```sh
+sh scripts/setup-local-signing.sh  # 本机首次构建前运行一次
 sh scripts/build-app.sh
 open build/EasyLens.app
 swift test
 ```
 
-首次使用如缺少英语或简体中文翻译资源，EasyLens 会显示说明窗口。点击「下载语言」后，macOS 会要求确认下载；可从菜单栏的「英中翻译语言」项随时重新检查。屏幕读取需要系统授权。完整选区翻译还需要辅助功能权限：首次唤醒时 EasyLens 会说明并提供系统设置入口；菜单栏会显示当前授权状态。授权前仍可使用单词翻译。临时签名的开发构建更新后，macOS 可能要求重新授权。
+首次使用如缺少英语或简体中文翻译资源，EasyLens 会显示说明窗口。点击「下载语言」后，macOS 会要求确认下载；可从菜单栏的「英中翻译语言」项随时重新检查。识别屏幕文字需要“屏幕与系统音频录制”权限；首次唤醒时 EasyLens 会说明并提供授权入口，未授权时不启动捕获。若系统设置的录屏应用列表里没有 EasyLens，点列表底部“＋”，在文件选择窗口按 ⇧⌘G 并输入 `build/EasyLens.app` 的完整路径；添加后按系统提示退出并重新打开应用。完整选区翻译还需要辅助功能权限，也有对应的首次使用说明。菜单栏会显示两项权限的当前状态。首次构建前运行本地签名脚本，可避免每次修改源码后反复授权。
 
 ## 仓库入口
 
@@ -28,4 +29,4 @@ swift test
 - [docs/product-scope.md](docs/product-scope.md)：已实现的首个产品范围与后续方向。
 - [AGENTS.md](AGENTS.md)：协作和检查约定。
 
-`Sources/EasyLens/` 是正式源码；`tmp/scripts/` 保留前期实验与回归材料，不再是应用构建入口。当前 `.app` 仅使用本地临时签名，尚未做正式发布签名、公证或自动更新。
+`Sources/EasyLens/` 是正式源码；`tmp/scripts/` 保留前期实验与回归材料，不再是应用构建入口。当前 `.app` 使用本地开发签名，尚未做正式发布签名、公证或自动更新。

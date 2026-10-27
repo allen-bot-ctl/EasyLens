@@ -18,6 +18,17 @@ cp "$repo_dir/Resources/Info.plist" "$app_dir/Contents/Info.plist"
 cp "$bin_dir/EasyLens" "$app_dir/Contents/MacOS/EasyLens.next"
 mv -f "$app_dir/Contents/MacOS/EasyLens.next" "$app_dir/Contents/MacOS/EasyLens"
 chmod 755 "$app_dir/Contents/MacOS/EasyLens"
-codesign --force --sign - --identifier ai.nangua.EasyLens "$app_dir"
+identity=${EASYLENS_CODESIGN_IDENTITY:-}
+if [ -z "$identity" ]; then
+  if security find-certificate -c 'EasyLens Local Development' \
+      "$HOME/Library/Keychains/login.keychain-db" >/dev/null 2>&1; then
+    identity='EasyLens Local Development'
+  else
+    identity='-'
+    echo 'Using ad hoc signing; run scripts/setup-local-signing.sh to keep macOS permissions across builds' >&2
+  fi
+fi
+codesign --force --sign "$identity" --identifier ai.nangua.EasyLens "$app_dir"
 codesign --verify --strict "$app_dir"
+echo "Signing identity: $identity"
 echo "$app_dir"

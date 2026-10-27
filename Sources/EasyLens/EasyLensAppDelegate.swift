@@ -20,6 +20,9 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
     private var accessibilityTimer: Timer?
     private var hasPresentedAccessibilitySetup = false
     private var accessibilityTrusted: Bool?
+    private var screenCaptureMenuItem: NSMenuItem!
+    private var hasPresentedScreenCaptureSetup = false
+    private var screenCaptureTrusted: Bool?
     private var selectionTargetPID: pid_t?
     private var applicationActivationObserver: NSObjectProtocol?
     private var panel: NSPanel!
@@ -194,6 +197,11 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
                                            keyEquivalent: "")
         accessibilityMenuItem.target = self
         menu.addItem(accessibilityMenuItem)
+        screenCaptureMenuItem = NSMenuItem(title: "屏幕读取：检查权限…",
+                                           action: #selector(showScreenCaptureSetup),
+                                           keyEquivalent: "")
+        screenCaptureMenuItem.target = self
+        menu.addItem(screenCaptureMenuItem)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "退出 EasyLens", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
@@ -211,9 +219,13 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         updateAccessibilityStatus()
+        updateScreenCaptureStatus()
         accessibilityTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) {
             [weak self] _ in
-            Task { @MainActor [weak self] in self?.updateAccessibilityStatus() }
+            Task { @MainActor [weak self] in
+                self?.updateAccessibilityStatus()
+                self?.updateScreenCaptureStatus()
+            }
         }
         print("EASYLENS_READY ⌃⌥L toggles eye lens; Esc hides; EL◉ menu quits")
         print("NO_CLOUD_CALLS screenshots_saved=0")
@@ -326,6 +338,40 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
         NSLog("EASYLENS_SELECTION %@", status)
     }
 
+    private func updateScreenCaptureStatus() {
+        let trusted = CGPreflightScreenCaptureAccess()
+        screenCaptureMenuItem.title = trusted ? "屏幕读取：已授权" :
+            "屏幕读取：需要录屏权限…"
+        screenCaptureMenuItem.isEnabled = !trusted
+        guard trusted != screenCaptureTrusted else { return }
+        screenCaptureTrusted = trusted
+        NSLog("EASYLENS_SCREEN_CAPTURE granted=%@", trusted ? "yes" : "no")
+    }
+
+    @objc private func showScreenCaptureSetup() {
+        _ = presentScreenCaptureSetup()
+    }
+
+    private func presentScreenCaptureSetup() -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "开启屏幕读取"
+        alert.informativeText = "EasyLens 需要 macOS 的“屏幕与系统音频录制”权限，才能识别鼠标附近的文字。应用只读取画面，不录音，也不保存截图。\n\n请在“系统设置 → 隐私与安全性 → 屏幕与系统音频录制”中允许 EasyLens。如果列表里没有它，点列表底部的“＋”，在文件选择窗口按 ⇧⌘G，输入以下路径后添加：\n\(Bundle.main.bundleURL.path)\n\nmacOS 可能要求退出并重新打开 EasyLens，授权才会生效。"
+        alert.addButton(withTitle: "打开系统设置")
+        alert.addButton(withTitle: "稍后")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        let granted = CGRequestScreenCaptureAccess()
+        NSLog("EASYLENS_SCREEN_CAPTURE_REQUEST granted=%@", granted ? "yes" : "no")
+        if !granted,
+           let url = URL(string:
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            let opened = NSWorkspace.shared.open(url)
+            NSLog("EASYLENS_SCREEN_CAPTURE_SETTINGS opened=%@", opened ? "yes" : "no")
+        }
+        updateScreenCaptureStatus()
+        return true
+    }
+
     @objc private func showAccessibilitySetup() {
         _ = presentAccessibilitySetup()
     }
@@ -360,6 +406,13 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
 
     private func showLens() {
         rememberSelectionTarget(NSWorkspace.shared.frontmostApplication)
+        if !CGPreflightScreenCaptureAccess() {
+            if !hasPresentedScreenCaptureSetup {
+                hasPresentedScreenCaptureSetup = true
+                _ = presentScreenCaptureSetup()
+            }
+            return
+        }
         if !AXIsProcessTrusted(), !hasPresentedAccessibilitySetup {
             hasPresentedAccessibilitySetup = true
             if presentAccessibilitySetup() { return }
