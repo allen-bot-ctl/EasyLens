@@ -342,9 +342,6 @@ private let focusMarker = "⟦X⟧"
 private let relativeTimeRegex = try! NSRegularExpression(
     pattern: "\\b([0-9]+)?\\s*(seconds?|minutes?|hours?|days?|weeks?|months?|years?)\\s*ago\\b",
     options: [.caseInsensitive])
-private let englishIslandRegex = try! NSRegularExpression(
-    pattern: "[A-Za-z]+(?:['’][A-Za-z]+)?(?:\\s+[A-Za-z]+(?:['’][A-Za-z]+)?)*")
-
 private func relativeTimeChinese(_ source: String) -> String? {
     let range = NSRange(location: 0, length: (source as NSString).length)
     guard let match = relativeTimeRegex.firstMatch(in: source, range: range),
@@ -526,6 +523,10 @@ private func resolveFocus(anchor: String, full: String, masked: String,
        local.contains("是"), micro.contains("是") {
         return FocusedTranslation(chinese: "是", basis: "语法作用")
     }
+    if anchor.count == 1, let value = anchor.unicodeScalars.first?.value,
+       (65...90).contains(value) {
+        return FocusedTranslation(chinese: "字母 \(anchor)", basis: "字母名称")
+    }
     // Contextual alignment can fail even when OCR has located the right word.
     // A marked dictionary-like answer is more useful than a silent miss here.
     // Very short words are excluded because standalone Translation commonly
@@ -571,9 +572,12 @@ private func looksLikePathOrCode(_ line: String) -> Bool {
 
 private func validatedEnglishWord(_ raw: String) -> String? {
     let word = raw.replacingOccurrences(of: "’", with: "'")
-    guard word.range(of: "^(?:[A-Za-z]{2,24}|[AaIi]|[A-Za-z]{2,20}'[A-Za-z]{1,5})$",
+    guard word.range(of: "^(?:[A-Za-z]{2,24}|[A-Z]|[aAiI]|[A-Za-z]{2,20}'[A-Za-z]{1,5})$",
                      options: .regularExpression) != nil else { return nil }
     if word.count <= 2 {
+        // An isolated capital is a letter name in prose (Q, U, ...), even
+        // though the spell checker only knows A and I as one-letter words.
+        if word.count == 1 && word.first?.isUppercase == true { return word }
         let shortWords: Set<String> = ["a", "i", "am", "an", "as", "at", "be", "by", "do",
                                        "go", "he", "hi", "if", "in", "is", "it", "me", "my",
                                        "no", "of", "oh", "on", "or", "so", "to", "up", "us", "we"]
@@ -634,13 +638,26 @@ private func clipboardWords(_ text: String) -> [String] {
     }
 }
 
+private func englishDominant(_ text: String) -> Bool {
+    let latin = text.unicodeScalars.filter {
+        (65...90).contains($0.value) || (97...122).contains($0.value)
+    }.count
+    let han = text.unicodeScalars.filter { (0x3400...0x9FFF).contains($0.value) }.count
+    return han == 0 ? latin > 0 : latin >= max(12, han * 3)
+}
+
 private func eligibleEnglishText(_ raw: String, maxLength: Int) -> String? {
     let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     guard (2...maxLength).contains(text.count),
           text.range(of: "[A-Za-z]", options: .regularExpression) != nil,
-          !text.unicodeScalars.contains(where: { (0x3400...0x9FFF).contains($0.value) }),
           !looksLikePathOrCode(text), !text.contains("{") && !text.contains("}") else {
         return nil
+    }
+    if text.unicodeScalars.contains(where: { (0x3400...0x9FFF).contains($0.value) }) {
+        // English prose may quote Chinese examples. Keep its full selection,
+        // while a Chinese passage with a stray Latin abbreviation stays out.
+        guard clipboardWords(text).count >= 3,
+              englishDominant(text) else { return nil }
     }
     if clipboardWords(text).count >= 3 {
         let recognizer = NLLanguageRecognizer()
@@ -1091,26 +1108,30 @@ private func passageAtCenter(_ image: CGImage, focus: CGPoint,
                                literalTranslation: literal, distance: focused.distance), ms(start))
     }
 
-    // The gaze point identifies a word. A few tightly adjacent OCR rows supply
-    // its source sentence; unrelated UI labels above or beside it stay out.
+    // The gaze point identifies a word. Keep the English context around small
+    // non-English insertions, such as quoted Han examples inside English prose.
+    // Replacing Han scalars with spaces preserves UTF-16 offsets for the anchor.
     let focusedRow = rows[focused.row]
-    let ordinaryEnglish = CharacterSet(charactersIn:
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,;:!?'-’")
-    let mixedOrNoisy = focusedRow.text.unicodeScalars.contains {
-        !ordinaryEnglish.contains($0)
+    func preservingEnglish(_ text: String) -> String {
+        var result = ""
+        for scalar in text.unicodeScalars {
+            if (0x3400...0x9FFF).contains(scalar.value) {
+                result += String(repeating: " ", count: scalar.utf16.count)
+            } else {
+                result.unicodeScalars.append(scalar)
+            }
+        }
+        return result
     }
-    let englishIsland = mixedOrNoisy ? englishIslandRegex.matches(
-        in: focusedRow.text,
-        range: NSRange(location: 0, length: (focusedRow.text as NSString).length)
-    ).first(where: { NSIntersectionRange($0.range, focused.range).length > 0 }) : nil
+    guard englishDominant(focusedRow.text) else { return (nil, ms(start)) }
     var selected = [focused.row]
     func canJoin(_ first: Int, _ second: Int) -> Bool {
         let a = rows[first].box
         let b = rows[second].box
         guard !looksLikePathOrCode(rows[second].text),
-              !rows[second].text.unicodeScalars.contains(where: {
-                  (0x3400...0x9FFF).contains($0.value)
-              }), a.height > 0, b.height > 0 else { return false }
+              englishDominant(rows[first].text),
+              englishDominant(rows[second].text),
+              a.height > 0, b.height > 0 else { return false }
         let heightRatio = b.height / a.height
         let verticalGap = max(0, a.minY - b.maxY, b.minY - a.maxY)
         return (0.72...1.38).contains(heightRatio) &&
@@ -1134,16 +1155,13 @@ private func passageAtCenter(_ image: CGImage, focus: CGPoint,
        NSIntersectionRange(comment, focused.range).length > 0 {
         combined = (focusedRow.text as NSString).substring(with: comment)
         anchorOffset = focused.range.location - comment.location
-    } else if let englishIsland {
-        combined = (focusedRow.text as NSString).substring(with: englishIsland.range)
-        anchorOffset = focused.range.location - englishIsland.range.location
     } else {
         for index in selected {
             if !combined.isEmpty { combined += " " }
             if index == focused.row {
                 anchorOffset = (combined as NSString).length + focused.range.location
             }
-            combined += rows[index].text
+            combined += preservingEnglish(rows[index].text)
         }
     }
     let characters = Array(combined)
