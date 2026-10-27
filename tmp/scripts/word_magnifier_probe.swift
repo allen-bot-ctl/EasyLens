@@ -455,6 +455,15 @@ private func dictionaryTerm(_ direct: String?) -> String? {
     return parts.reversed().compactMap(cleanChineseTerm).first
 }
 
+private func translationFallback(_ text: String?, maxLength: Int) -> String? {
+    guard let text else { return nil }
+    let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !value.isEmpty, value.count <= maxLength,
+          value.unicodeScalars.contains(where: { (0x3400...0x9FFF).contains($0.value) }),
+          !value.contains(focusMarker) else { return nil }
+    return value
+}
+
 private func resolveFocus(anchor: String, full: String, masked: String,
                           local: String, maskedLocal: String,
                           sourceLocal: String,
@@ -496,13 +505,13 @@ private func resolveFocus(anchor: String, full: String, masked: String,
     if let word = translatedDifference(micro, maskedMicro,
                                        allowOneCharacterSuffix: true),
        !maskedMicro.contains(word),
-       word.count >= 2 || full.contains(word) || local.contains(word) {
+       (full.contains(word) || direct?.contains(word) == true) {
         return FocusedTranslation(chinese: word, basis: "邻近短语")
     }
     if let word = translatedDifference(prefix, maskedPrefix,
                                        allowOneCharacterSuffix: true),
        !maskedPrefix.contains(word),
-       word.count >= 2 || full.contains(word) || local.contains(word) {
+       (full.contains(word) || direct?.contains(word) == true) {
         return FocusedTranslation(chinese: word, basis: "邻近短语")
     }
     if let word = sharedContextTerm(full: full, local: local,
@@ -527,12 +536,19 @@ private func resolveFocus(anchor: String, full: String, masked: String,
        (65...90).contains(value) {
         return FocusedTranslation(chinese: "字母 \(anchor)", basis: "字母名称")
     }
-    // Contextual alignment can fail even when OCR has located the right word.
-    // A marked dictionary-like answer is more useful than a silent miss here.
-    // Very short words are excluded because standalone Translation commonly
-    // treats "in" as the chemical element rather than the preposition.
-    if normalized.count >= 3, let word = dictionaryTerm(direct) {
+    // Alignment is a quality check, not a condition for showing a result.
+    // Standalone glosses of short words can be ambiguous, so label them clearly.
+    if let word = dictionaryTerm(direct),
+       [full, local, micro].contains(where: { $0.contains(word) }) {
         return FocusedTranslation(chinese: word, basis: "单词参考")
+    }
+    for context in [full, local, micro] {
+        if let phrase = translationFallback(context, maxLength: 80) {
+            return FocusedTranslation(chinese: phrase, basis: "语境参考")
+        }
+    }
+    if let word = translationFallback(direct, maxLength: 32) {
+        return FocusedTranslation(chinese: word, basis: "直译参考")
     }
     return FocusedTranslation(chinese: nil, basis: "")
 }
@@ -875,11 +891,14 @@ private func hintedOCRCorrection(_ raw: String, hint: String?) -> String? {
 private func focusedWordWithHint(_ raw: String, hint: String?) ->
     (word: String?, usedHint: Bool) {
     let ordinary = validatedEnglishWord(raw)
-    guard ordinary?.caseInsensitiveCompare(raw) != .orderedSame,
-          let hinted = hintedOCRCorrection(raw, hint: hint) else {
-        return (ordinary, false)
+    if ordinary?.caseInsensitiveCompare(raw) != .orderedSame,
+       let hinted = hintedOCRCorrection(raw, hint: hint) {
+        return (hinted, true)
     }
-    return (hinted, true)
+    // Vision already located a Latin token under the gaze. Spell checking may
+    // reject names, inflections, or noisy OCR; keep that token as a low-confidence
+    // focus instead of silently switching to a neighboring word.
+    return (ordinary ?? (raw.count >= 2 ? raw : nil), false)
 }
 
 private func passageAtCenter(_ image: CGImage, focus: CGPoint,
@@ -1123,7 +1142,8 @@ private func passageAtCenter(_ image: CGImage, focus: CGPoint,
         }
         return result
     }
-    guard englishDominant(focusedRow.text) else { return (nil, ms(start)) }
+    // The focal token itself is Latin. A Chinese-heavy surrounding line should
+    // reduce context, not suppress translation of that visible English token.
     var selected = [focused.row]
     func canJoin(_ first: Int, _ second: Int) -> Bool {
         let a = rows[first].box
@@ -1428,8 +1448,8 @@ private struct TranslationTaskView: View {
                   !localContext.isEmpty, !maskedLocalContext.isEmpty,
                   !microContext.isEmpty, !maskedMicroContext.isEmpty,
                   !prefixContext.isEmpty, !maskedPrefixContext.isEmpty else { return }
+            let start = uptime()
             do {
-                let start = uptime()
                 let requests = [
                     TranslationSession.Request(sourceText: sentence,
                                                clientIdentifier: "context"),
@@ -1478,7 +1498,26 @@ private struct TranslationTaskView: View {
                                          direct: translated["word"])
                 bridge.onResult?(generation, .success((focus, ms(start))))
             } catch {
-                bridge.onResult?(generation, .failure(error))
+                // One malformed contextual request must not suppress a readable
+                // focal word. Retry only that word on the same local session.
+                do {
+                    let response = try await session.translations(from: [
+                        TranslationSession.Request(sourceText: anchor,
+                                                   clientIdentifier: "word")
+                    ])
+                    let direct = response.first?.targetText
+                    let fallback = resolveFocus(anchor: anchor, full: "", masked: "",
+                                                local: "", maskedLocal: "",
+                                                sourceLocal: localContext,
+                                                sourceMicro: microContext,
+                                                micro: "", maskedMicro: "",
+                                                sourcePrefix: prefixContext,
+                                                prefix: "", maskedPrefix: "",
+                                                direct: direct)
+                    bridge.onResult?(generation, .success((fallback, ms(start))))
+                } catch {
+                    bridge.onResult?(generation, .failure(error))
+                }
             }
         }
     }
