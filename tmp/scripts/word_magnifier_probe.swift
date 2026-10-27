@@ -1595,6 +1595,14 @@ private final class EyeLensView: NSView {
             NSColor(calibratedWhite: 0.92, alpha: 0.28).setStroke()
         }
         pupilEdge.stroke()
+        let eyeBallDiameter = pupil.height * 0.56
+        let eyeBall = NSBezierPath(ovalIn: CGRect(x: center.x - eyeBallDiameter / 2,
+                                                 y: center.y - eyeBallDiameter / 2,
+                                                 width: eyeBallDiameter,
+                                                 height: eyeBallDiameter))
+        eyeBall.lineWidth = 0.7
+        NSColor(calibratedWhite: 0.96, alpha: 0.16).setStroke()
+        eyeBall.stroke()
         let lowerLid = NSBezierPath()
         lowerLid.move(to: CGPoint(x: center.x + irisRadiusX * 0.38,
                                   y: center.y - irisRadiusY * 0.70))
