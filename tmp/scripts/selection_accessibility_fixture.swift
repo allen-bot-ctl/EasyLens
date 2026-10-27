@@ -33,7 +33,7 @@ private final class SelectionFixture: NSObject, NSApplicationDelegate, WKNavigat
         }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        Timer.scheduledTimer(withTimeInterval: 60, repeats: false) { _ in NSApp.terminate(nil) }
+        Timer.scheduledTimer(withTimeInterval: 180, repeats: false) { _ in NSApp.terminate(nil) }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

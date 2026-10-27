@@ -14,8 +14,7 @@ import Vision
 private func uptime() -> Double { ProcessInfo.processInfo.systemUptime }
 private func ms(_ start: Double) -> Double { (uptime() - start) * 1_000 }
 
-// Highlighted white text on blue has weak contrast for Vision's fast model.
-// Keep bright neutral glyph pixels and darken the selection fill in memory.
+// Retained for the offline OCR comparison CLI; live selected text bypasses OCR.
 private func highContrastSelectionImage(_ image: CGImage) -> CGImage? {
     let width = image.width
     let height = image.height
@@ -45,18 +44,102 @@ private func highContrastSelectionImage(_ image: CGImage) -> CGImage? {
 private struct LiveSelection {
     let text: String?
     let state: String
-    let hasSelection: Bool
+    let pointHit: Bool
+}
+
+private func axValue<T>(_ value: CFTypeRef?, type: AXValueType, into result: inout T) -> Bool {
+    guard let value, CFGetTypeID(value) == AXValueGetTypeID() else { return false }
+    return withUnsafeMutableBytes(of: &result) {
+        AXValueGetValue(value as! AXValue, type, $0.baseAddress!)
+    }
+}
+
+private func axParameter(_ element: AXUIElement, _ name: String,
+                         _ input: CFTypeRef) -> CFTypeRef? {
+    var output: CFTypeRef?
+    guard AXUIElementCopyParameterizedAttributeValue(element, name as CFString,
+                                                      input, &output) == .success else { return nil }
+    return output
+}
+
+private func axPoint(_ pointer: CGPoint) -> CGPoint {
+    // Accessibility uses a top-left screen origin; AppKit uses bottom-left.
+    let main = NSScreen.screens.first {
+        ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+            == CGMainDisplayID()
+    }
+    return CGPoint(x: pointer.x, y: (main?.frame.maxY ?? 0) - pointer.y)
+}
+
+private func selectedPointHit(_ element: AXUIElement, pointer: CGPoint,
+                              markerRange: CFTypeRef?) -> Bool {
+    var point = axPoint(pointer)
+    guard let position = AXValueCreate(.cgPoint, &point) else { return false }
+    if let selectedValue = axParameter(element, "AXRangeForPosition", position) {
+        var selected = CFRange()
+        // Native text elements expose a selected CFRange. The position range
+        // identifies the actual character under the pointer, not an OCR guess.
+        var selectedAttribute: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString,
+                                         &selectedAttribute) == .success,
+           axValue(selectedAttribute, type: .cfRange, into: &selected),
+           selected.length > 0 {
+            var pointed = CFRange()
+            if axValue(selectedValue, type: .cfRange, into: &pointed),
+               pointed.location >= selected.location,
+               pointed.location < selected.location + selected.length {
+                var character = CFRange(location: pointed.location, length: 1)
+                if let characterValue = AXValueCreate(.cfRange, &character),
+                   let boundsValue = axParameter(element, "AXBoundsForRange", characterValue) {
+                    var bounds = CGRect.zero
+                    if axValue(boundsValue, type: .cgRect, into: &bounds) {
+                        return bounds.insetBy(dx: -3, dy: -3).contains(point)
+                    }
+                }
+            }
+            return false
+        }
+    }
+    guard let markerRange,
+          CFGetTypeID(markerRange) == AXTextMarkerRangeGetTypeID(),
+          let pointedMarker = axParameter(element, "AXTextMarkerForPosition", position),
+          CFGetTypeID(pointedMarker) == AXTextMarkerGetTypeID() else {
+        return false
+    }
+    let start = AXTextMarkerRangeCopyStartMarker(markerRange as! AXTextMarkerRange)
+    let end = AXTextMarkerRangeCopyEndMarker(markerRange as! AXTextMarkerRange)
+    guard let pointedIndex = axParameter(element, "AXIndexForTextMarker", pointedMarker) as? NSNumber,
+          let startIndex = axParameter(element, "AXIndexForTextMarker", start) as? NSNumber,
+          let endIndex = axParameter(element, "AXIndexForTextMarker", end) as? NSNumber,
+          pointedIndex.intValue >= startIndex.intValue,
+          pointedIndex.intValue < endIndex.intValue else { return false }
+    // WebKit markers can snap to nearby text. Confirm the corresponding glyph's
+    // bounds before accepting a hit, so adjacent lines and trailing space miss.
+    let nextIndex = pointedIndex.intValue + 1
+    let nextNumber = NSNumber(value: nextIndex)
+    guard let next = axParameter(element, "AXTextMarkerForIndex", nextNumber),
+          CFGetTypeID(next) == AXTextMarkerGetTypeID() else {
+        return false
+    }
+    let characterRange = AXTextMarkerRangeCreate(nil, pointedMarker as! AXTextMarker,
+                                                 next as! AXTextMarker)
+    guard let boundsValue = axParameter(element, "AXBoundsForTextMarkerRange", characterRange) else {
+        return false
+    }
+    var bounds = CGRect.zero
+    return axValue(boundsValue, type: .cgRect, into: &bounds) &&
+        bounds.insetBy(dx: -3, dy: -3).contains(point)
 }
 
 // Reading the highlighted text does not change the clipboard or the target app.
 // A short AX timeout keeps an unresponsive app from holding up the lens.
-private func readLiveSelection() -> LiveSelection {
+private func readLiveSelection(at pointer: CGPoint? = nil) -> LiveSelection {
     guard AXIsProcessTrusted() else {
-        return LiveSelection(text: nil, state: "permission-denied", hasSelection: false)
+        return LiveSelection(text: nil, state: "permission-denied", pointHit: false)
     }
     guard let target = NSWorkspace.shared.frontmostApplication,
           target.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
-        return LiveSelection(text: nil, state: "no-target", hasSelection: false)
+        return LiveSelection(text: nil, state: "no-target", pointHit: false)
     }
     let application = AXUIElementCreateApplication(target.processIdentifier)
     AXUIElementSetMessagingTimeout(application, 0.2)
@@ -65,7 +148,7 @@ private func readLiveSelection() -> LiveSelection {
         application, kAXFocusedUIElementAttribute as CFString, &focused)
     guard focusError == .success, let focused else {
         return LiveSelection(text: nil, state: "focus-\(focusError.rawValue)",
-                             hasSelection: false)
+                             pointHit: false)
     }
     let element = focused as! AXUIElement
     AXUIElementSetMessagingTimeout(element, 0.2)
@@ -74,13 +157,13 @@ private func readLiveSelection() -> LiveSelection {
         element, kAXSelectedTextAttribute as CFString, &value)
     var raw = selectionError == .success ? value as? String : nil
     var method = "selected-text"
-    if raw?.isEmpty != false {
-        // WebKit exposes the current highlight as a text-marker range even
-        // when AXSelectedText returns kAXErrorNoValue.
-        var markerRange: CFTypeRef?
-        let rangeError = AXUIElementCopyAttributeValue(
-            element, "AXSelectedTextMarkerRange" as CFString, &markerRange)
-        if rangeError == .success, let markerRange {
+    var markerRange: CFTypeRef?
+    // Read the marker range even when AXSelectedText exists: some WebKit
+    // elements provide its text but no native AXSelectedTextRange geometry.
+    let rangeError = AXUIElementCopyAttributeValue(
+        element, "AXSelectedTextMarkerRange" as CFString, &markerRange)
+    if raw?.isEmpty != false, rangeError == .success, let markerRange {
+        if CFGetTypeID(markerRange) == AXTextMarkerRangeGetTypeID() {
             var markedText: CFTypeRef?
             let markedError = AXUIElementCopyParameterizedAttributeValue(
                 element, "AXStringForTextMarkerRange" as CFString,
@@ -94,11 +177,13 @@ private func readLiveSelection() -> LiveSelection {
     guard let raw,
           !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         return LiveSelection(text: nil, state: "empty-\(selectionError.rawValue)",
-                             hasSelection: false)
+                             pointHit: false)
     }
-    let text = eligibleClipboardHint(raw)
+    let text = eligibleEnglishText(raw, maxLength: 1200)
     return LiveSelection(text: text, state: text == nil ? "ineligible" : method,
-                         hasSelection: true)
+                         pointHit: pointer.map {
+                            selectedPointHit(element, pointer: $0, markerRange: markerRange)
+                         } == true)
 }
 
 private struct FocusedPassage {
@@ -413,9 +498,9 @@ private func clipboardWords(_ text: String) -> [String] {
     }
 }
 
-private func eligibleClipboardHint(_ raw: String) -> String? {
+private func eligibleEnglishText(_ raw: String, maxLength: Int) -> String? {
     let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard (2...400).contains(text.count),
+    guard (2...maxLength).contains(text.count),
           text.range(of: "[A-Za-z]", options: .regularExpression) != nil,
           !text.unicodeScalars.contains(where: { (0x3400...0x9FFF).contains($0.value) }),
           !looksLikePathOrCode(text), !text.contains("{") && !text.contains("}") else {
@@ -429,6 +514,10 @@ private func eligibleClipboardHint(_ raw: String) -> String? {
         }
     }
     return text
+}
+
+private func eligibleClipboardHint(_ raw: String) -> String? {
+    eligibleEnglishText(raw, maxLength: 400)
 }
 
 private func oneMissingCharacter(_ complete: String, _ fragment: String) -> Bool {
@@ -1614,10 +1703,10 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
         let contentWidth = width - 32
         let font = NSFont.systemFont(ofSize: 15, weight: .medium)
         let measured = (chinese as NSString).boundingRect(
-            with: CGSize(width: contentWidth, height: 500),
+            with: CGSize(width: contentWidth, height: 10000),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [.font: font]).height
-        let textHeight = min(210, max(34, ceil(measured) + 4))
+        let textHeight = min(screen.frame.height - 120, max(34, ceil(measured) + 4))
         let height = textHeight + 54
         translationPanel.setContentSize(CGSize(width: width, height: height))
         translationPanel.contentView?.frame = CGRect(x: 0, y: 0, width: width, height: height)
@@ -1650,13 +1739,12 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
                 return
             }
             selectionCache[source] = translated
+            let pointer = fixedPoint ?? NSEvent.mouseLocation
+            let live = activeSelectionSource == "accessibility" ?
+                readLiveSelection(at: pointer) : nil
+            let stillSelected = live?.pointHit == true && live?.text == source
             if panel.isVisible, activeSelectionHint == source,
-               (activeSelectionSource != "accessibility" || readLiveSelection().text == source),
-               let currentAnchor, let currentFocusLine, let currentFocusWordIndex,
-               selectedTextAtFocus(source, anchor: currentAnchor,
-                                   focusLine: currentFocusLine,
-                                   focusWordIndex: currentFocusWordIndex,
-                                   allowShortOCRNoise: activeSelectionSource == "accessibility") != nil {
+               stillSelected {
                 showSelectionCard(translated, pointer: fixedPoint ?? NSEvent.mouseLocation)
             }
             print(String(format: "SELECTION_TRANSLATION translatedMs=%.1f resolved=yes cloudCalls=0",
@@ -1678,6 +1766,44 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
         let y = max(screen.frame.minY, min(pointer.y - height / 2,
                                           screen.frame.maxY - height))
         return CGRect(x: x, y: y, width: width, height: height)
+    }
+
+    // The actual highlighted range owns this point. Use its complete AX text
+    // immediately; OCR and focal-word scoring have no say in this branch.
+    private func handleSelectedPointHit(_ live: LiveSelection, pointer: CGPoint,
+                                        generation current: Int) -> Bool {
+        guard panel.isVisible, current == generation, live.pointHit else { return false }
+        let selected = live.text
+        if activeSelectionHint != selected || activeSelectionSource != "accessibility" {
+            selectionRequestID += 1
+            pendingSelectionText = nil
+            activeSelectionHint = selected
+            activeSelectionSource = "accessibility"
+            print("SELECTION_HIT source=accessibility geometry=yes length=\(selected?.count ?? 0) axState=\(live.state)")
+        }
+        currentSentence = nil
+        currentAnchor = nil
+        currentFocusLine = nil
+        currentFocusWordIndex = nil
+        pendingTranslationKey = nil
+        view.isReading = false
+        inspectedGeneration = -1
+        nextInspectionAt = uptime() + 0.3
+        if let selected, let cached = selectionCache[selected] {
+            showSelectionCard(cached, pointer: pointer)
+        } else if let selected, pendingSelectionText != selected {
+            translationPanel.orderOut(nil)
+            showingSelectionCard = false
+            selectionRequestID += 1
+            pendingSelectionText = selected
+            selectionBridge.translate(selected, requestID: selectionRequestID)
+            print("SELECTION_TRANSLATION requested length=\(selected.count) cloudCalls=0")
+        } else if selected == nil {
+            translationPanel.orderOut(nil)
+            showingSelectionCard = false
+        }
+        fflush(stdout)
+        return true
     }
 
     private func displayID(for screen: NSScreen) -> CGDirectDisplayID? {
@@ -1765,6 +1891,21 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
                               screen: NSScreen, filter: SCContentFilter) async {
         defer { scanning = false }
         do {
+            let initialSelection = readLiveSelection(at: pointer)
+            if handleSelectedPointHit(initialSelection, pointer: pointer, generation: current) {
+                return
+            }
+            if activeSelectionSource == "accessibility" {
+                activeSelectionHint = nil
+                activeSelectionSource = "none"
+                selectionRequestID += 1
+                pendingSelectionText = nil
+                if showingSelectionCard {
+                    translationPanel.orderOut(nil)
+                    showingSelectionCard = false
+                }
+                print("SELECTION_HIT source=accessibility geometry=no")
+            }
             // The OCR request runs separately, so it cannot hold the visual frame gate.
             let scan = wordScanFrame(around: pointer, on: screen)
             let scanConfig = SCStreamConfiguration()
@@ -1782,21 +1923,14 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
             let focus = CGPoint(x: (pointer.x - scan.minX) / scan.width,
                                 y: (pointer.y - scan.minY) / scan.height)
             let hint = clipboardHint
-            let selectedAtCapture = readLiveSelection().hasSelection
             let (passage, ocrMs) = try await Task.detached(priority: .userInitiated) {
-                if selectedAtCapture,
-                   let highContrast = highContrastSelectionImage(scanImage) {
-                    let result = try passageAtCenter(highContrast, focus: focus,
-                                                     clipboardHint: hint)
-                    if result.0 != nil { return result }
-                }
                 return try passageAtCenter(scanImage, focus: focus, clipboardHint: hint)
             }.value
             guard panel.isVisible, current == generation else { return }
-            let live = readLiveSelection()
-            let source = live.hasSelection ? "accessibility" :
-                (clipboardHint == nil ? "none" : "clipboard")
-            let selectionHint = live.hasSelection ? live.text : clipboardHint
+            let live = readLiveSelection(at: pointer)
+            if handleSelectedPointHit(live, pointer: pointer, generation: current) { return }
+            let source = "none"
+            let selectionHint: String? = nil
             if activeSelectionHint != selectionHint || activeSelectionSource != source {
                 selectionRequestID += 1
                 pendingSelectionText = nil
@@ -1860,29 +1994,6 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
             print(String(format: "SENTENCE_FOCUS found anchorLength=%d sentenceLength=%d distance=%.3f scanMs=%.1f ocrMs=%.1f",
                          passage.anchor.count, passage.sentence.count, passage.distance, scanMs, ocrMs))
             fflush(stdout)
-            let selected = selectionHint.flatMap {
-                selectedTextAtFocus($0, anchor: passage.anchor,
-                                    focusLine: passage.focusLine,
-                                    focusWordIndex: passage.focusWordIndex,
-                                    allowShortOCRNoise: source == "accessibility")
-            }
-            if let selected {
-                if let cached = selectionCache[selected] {
-                    showSelectionCard(cached, pointer: pointer)
-                } else if pendingSelectionText != selected {
-                    selectionRequestID += 1
-                    pendingSelectionText = selected
-                    selectionBridge.translate(selected, requestID: selectionRequestID)
-                    print("SELECTION_TRANSLATION requested length=\(selected.count) cloudCalls=0")
-                }
-                return
-            }
-            if let hint = selectionHint, clipboardWords(hint).count > 1 {
-                let reason = passage.focusWordIndex < 0 ? "no-direct-hit" : "focus-row-mismatch"
-                print(String(format: "SELECTION_FOCUS skipped reason=%@ distance=%.3f hintWords=%d rowWords=%d",
-                             reason, passage.distance, clipboardWords(hint).count,
-                             clipboardWords(passage.focusLine).count))
-            }
             if showingSelectionCard {
                 translationPanel.orderOut(nil)
                 showingSelectionCard = false
@@ -1932,13 +2043,7 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
         guard panel.isVisible, current == generation,
               let currentSentence, let currentAnchor else { return }
         pendingTranslationKey = nil
-        if let hint = activeSelectionHint, let currentFocusLine, let currentFocusWordIndex,
-           selectedTextAtFocus(hint, anchor: currentAnchor,
-                               focusLine: currentFocusLine,
-                               focusWordIndex: currentFocusWordIndex,
-                               allowShortOCRNoise: activeSelectionSource == "accessibility") != nil {
-            return
-        }
+        if readLiveSelection(at: fixedPoint ?? NSEvent.mouseLocation).pointHit { return }
         switch result {
         case .success(let (translation, elapsed)):
             translationFailures = 0
@@ -2062,6 +2167,13 @@ private enum WordMagnifierMain {
         if args.contains("--inspect-ax-selection") {
             let selection = readLiveSelection()
             print("AX_SELECTION state=\(selection.state) length=\(selection.text?.count ?? 0)")
+            return
+        }
+        if let index = args.firstIndex(of: "--inspect-selection-point"),
+           index + 2 < args.count,
+           let x = Double(args[index + 1]), let y = Double(args[index + 2]) {
+            let selection = readLiveSelection(at: CGPoint(x: x, y: y))
+            print("AX_SELECTION_POINT state=\(selection.state) length=\(selection.text?.count ?? 0) hit=\(selection.pointHit)")
             return
         }
         if let index = args.firstIndex(of: "--translate-selection"), index + 1 < args.count {
