@@ -1610,8 +1610,11 @@ private final class EyeLensView: NSView {
             let innerRadius = eyeBallRadius * (0.32 + 0.06 * sin(phase * 1.73))
             let outerRadius = eyeBallRadius * (0.78 + 0.16 * sin(phase * 0.91))
             let bend = angle + 0.09 * sin(phase * 1.19)
-            context.setStrokeColor(NSColor(calibratedRed: 0.66, green: 0.77, blue: 0.84,
-                                           alpha: index.isMultiple(of: 5) ? 0.19 : 0.10).cgColor)
+            let fiber = hasTranslation
+                ? NSColor.systemYellow.withAlphaComponent(index.isMultiple(of: 5) ? 0.34 : 0.20)
+                : NSColor(calibratedRed: 0.66, green: 0.77, blue: 0.84,
+                          alpha: index.isMultiple(of: 5) ? 0.19 : 0.10)
+            context.setStrokeColor(fiber.cgColor)
             context.setLineWidth(index.isMultiple(of: 7) ? 0.7 : 0.45)
             context.move(to: CGPoint(x: center.x + cos(angle) * innerRadius,
                                      y: center.y + sin(angle) * innerRadius))
@@ -1625,7 +1628,8 @@ private final class EyeLensView: NSView {
         let innerEye = NSBezierPath(ovalIn: eyeBallRect.insetBy(dx: eyeBallRadius * 0.73,
                                                                  dy: eyeBallRadius * 0.73))
         innerEye.lineWidth = 0.55
-        NSColor(calibratedWhite: 0.95, alpha: 0.16).setStroke()
+        (hasTranslation ? NSColor.systemYellow.withAlphaComponent(0.30)
+                        : NSColor(calibratedWhite: 0.95, alpha: 0.16)).setStroke()
         innerEye.stroke()
         eyeBall.lineWidth = 0.7
         NSColor(calibratedWhite: 0.96, alpha: 0.16).setStroke()
