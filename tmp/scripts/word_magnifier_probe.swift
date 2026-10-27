@@ -1606,7 +1606,7 @@ private final class EyeLensView: NSView {
         // Two quiet neutral strokes keep the contour legible on both light and
         // dark content without turning the gaze target into a persistent badge.
         eye.lineWidth = 1.8
-        NSColor(calibratedWhite: 0.02, alpha: 0.16).setStroke()
+        NSColor(calibratedWhite: 0.02, alpha: 0.10).setStroke()
         eye.stroke()
         eye.lineWidth = 0.8
         NSColor(calibratedWhite: 0.96, alpha: 0.45).setStroke()
@@ -1630,7 +1630,7 @@ private final class EyeLensView: NSView {
 
 @MainActor
 private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
-    private let lensSize = CGSize(width: 190, height: 122)
+    private let lensSize = CGSize(width: 190, height: 114)
     private let bridge = WordTranslationBridge()
     private let selectionBridge = SelectionTranslationBridge()
     private var panel: NSPanel!
