@@ -69,7 +69,8 @@ func geometry(_ element: AXUIElement, _ point: CGPoint) -> String {
             result += " lineMarker=\(line != nil)"
             if let line { result += " lineBounds=\(rectString(parameter(element, "AXBoundsForTextMarkerRange", line)))" }
         }
-        if let startLine, let endLine, endLine.intValue - startLine.intValue <= 6 {
+        if let startLine, let endLine, endLine.intValue >= startLine.intValue,
+           endLine.intValue - startLine.intValue <= 6 {
             for line in startLine.intValue...endLine.intValue {
                 if let lineRange = parameter(element, "AXTextMarkerRangeForLine", NSNumber(value: line)) {
                     result += " L\(line)=\(rectString(parameter(element, "AXBoundsForTextMarkerRange", lineRange)))"
@@ -128,7 +129,7 @@ let pointStart = targetPID == nil ? 1 : 3
 guard let app = NSWorkspace.shared.frontmostApplication else { exit(1) }
 let pid = targetPID ?? app.processIdentifier
 print("app=\(app.localizedName ?? "?") targetPID=\(pid)")
-let root = AXUIElementCreateApplication(pid)
+let root = args.contains("--system") ? AXUIElementCreateSystemWide() : AXUIElementCreateApplication(pid)
 AXUIElementSetMessagingTimeout(root, 0.25)
 let focused = attribute(root, kAXFocusedUIElementAttribute as String)
 let point = args.count >= pointStart + 2 ?

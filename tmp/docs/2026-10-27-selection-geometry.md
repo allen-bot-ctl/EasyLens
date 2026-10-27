@@ -41,3 +41,11 @@ WKWebView 选区也完成了鱼眼运行路径：日志记录 `geometry=yes leng
 独立 Chrome Canary 进程以 `--force-renderer-accessibility` 打开 `tmp/scripts/selection_chromium_fixture.html`，页面由浏览器自身创建高亮选区，EasyLens 未控制它的选区内容。选区起止偏移为 5 至 120，覆盖第一行的一部分与第二行的一部分。固定点检查：第一行选中处命中、第二行选中处命中、第二行未选中的右侧及下一行均未命中。完整运行时记录 `SELECTION_HIT ... length=115`、`SELECTION_TRANSLATION requested length=115`、`resolved=yes`；同一浏览器页面指向未高亮部分，记录 `SENTENCE_FOCUS` 与 `FOCUS_TRANSLATION`，未进入选区翻译。实验使用单独浏览器进程，因此验证的是跨应用辅助功能路径，而非 EasyLens 自身窗口。
 
 复现边界：目标 ChatGPT 客户端原先那条选区在检查时已经消失，暂时无法复现用户截图的原样运行结果。其他应用还可能缺少文本选区、标记或字形边界接口；这些情况仍走单词 OCR，不凭截图颜色猜测高亮。选区判断不依赖剪贴板。
+
+## Tabbit 复测修正
+
+上述“原始目标应用仍需复测”的边界已在同日补做。用户的新截图来自 Tabbit 的 Claude 页面，并非独立 Chrome Canary 页面。该应用返回了完整选中文本，却对文本范围提供零尺寸边界，导致前一版仍显示单词卡。资料调查、辅助功能观测和新的 OCR 辅助定位记录见 [跨应用选区调研](2026-10-27-cross-app-selection-research.md)。
+
+在 Tabbit 页面选中 325 字符、鱼眼指向选中文字后，运行日志记录 `SELECTION_HIT source=accessibility-visual length=325`，接着发起并完成本地整段翻译；截屏也确认显示“选区翻译”卡。此分支只在几何接口不可用、且焦点行与当前实时选区连续匹配时启用。它不是证明所有应用都提供精确选区几何。长译文卡的文本高度曾低估；复测中加大按实际控件测得的高度后，截屏确认尾句“我可以帮助你整理它。”完整可见。
+
+保持第二段高亮不变，将固定鱼眼中心移到上一段未选中的 `It's`：运行日志只有 `SENTENCE_FOCUS` / `FOCUS_TRANSLATION`，屏幕显示单词卡，没有 `SELECTION_HIT`。这验证了同一页面上“选中段落”和“未选中行”的两种路径。
