@@ -1604,16 +1604,16 @@ private final class EyeLensView: NSView {
         NSColor(calibratedWhite: 0.96, alpha: 0.22).setStroke()
         lowerLid.stroke()
         let upperLid = NSBezierPath()
-        upperLid.move(to: CGPoint(x: center.x - irisRadiusX * 0.76,
-                                  y: center.y + irisRadiusY * 0.48))
-        upperLid.curve(to: CGPoint(x: center.x - irisRadiusX * 0.26,
-                                   y: center.y + irisRadiusY * 0.82),
-                       controlPoint1: CGPoint(x: center.x - irisRadiusX * 0.59,
-                                              y: center.y + irisRadiusY * 0.66),
-                       controlPoint2: CGPoint(x: center.x - irisRadiusX * 0.42,
-                                              y: center.y + irisRadiusY * 0.80))
-        upperLid.lineWidth = 0.65
-        NSColor(calibratedWhite: 0.96, alpha: 0.18).setStroke()
+        upperLid.move(to: CGPoint(x: center.x - irisRadiusX * 0.38,
+                                  y: center.y + irisRadiusY * 0.70))
+        upperLid.curve(to: CGPoint(x: center.x - irisRadiusX * 0.86,
+                                   y: center.y + irisRadiusY * 0.22),
+                       controlPoint1: CGPoint(x: center.x - irisRadiusX * 0.56,
+                                              y: center.y + irisRadiusY * 0.64),
+                       controlPoint2: CGPoint(x: center.x - irisRadiusX * 0.75,
+                                              y: center.y + irisRadiusY * 0.39))
+        upperLid.lineWidth = 0.75
+        NSColor(calibratedWhite: 0.96, alpha: 0.22).setStroke()
         upperLid.stroke()
         // Keep the resting contour barely visible; the yellow stroke marks lock-on.
         eye.lineWidth = 1.8
