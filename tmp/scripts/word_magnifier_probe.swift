@@ -71,6 +71,51 @@ private func axPoint(_ pointer: CGPoint) -> CGPoint {
     return CGPoint(x: pointer.x, y: (main?.frame.maxY ?? 0) - pointer.y)
 }
 
+private func axRect(_ value: CFTypeRef?) -> CGRect? {
+    var bounds = CGRect.zero
+    guard axValue(value, type: .cgRect, into: &bounds),
+          bounds.width > 0, bounds.height > 0,
+          bounds.origin.x.isFinite, bounds.origin.y.isFinite else { return nil }
+    return bounds
+}
+
+// Chromium can provide the selection's text markers and bounds while refusing
+// AXTextMarkerForPosition. Walk its visual line ends instead of using the
+// selection's union rectangle, which would include unselected gaps.
+private func selectedMarkerLinesHit(_ element: AXUIElement, range: AXTextMarkerRange,
+                                    point: CGPoint) -> Bool {
+    guard let union = axRect(axParameter(element, "AXBoundsForTextMarkerRange", range)),
+          union.insetBy(dx: -2, dy: -2).contains(point),
+          let source = axParameter(element, "AXStringForTextMarkerRange", range) as? String,
+          !source.isEmpty else { return false }
+    let totalLength = (source as NSString).length
+    let end = AXTextMarkerRangeCopyEndMarker(range)
+    var cursor = AXTextMarkerRangeCopyStartMarker(range)
+    var consumed = 0
+    for _ in 0..<80 {
+        guard let next = axParameter(element, "AXNextLineEndTextMarkerForTextMarker", cursor),
+              CFGetTypeID(next) == AXTextMarkerGetTypeID() else {
+            // A single visual line has no internal gaps to distinguish.
+            return consumed == 0 && union.height <= 42 &&
+                union.insetBy(dx: -2, dy: -2).contains(point)
+        }
+        let wholeLine = AXTextMarkerRangeCreate(nil, cursor, next as! AXTextMarker)
+        guard let lineText = axParameter(element, "AXStringForTextMarkerRange", wholeLine) as? String,
+              !lineText.isEmpty else { return false }
+        let lineLength = (lineText as NSString).length
+        let lastLine = consumed + lineLength >= totalLength
+        let fragment = consumed + lineLength > totalLength ?
+            AXTextMarkerRangeCreate(nil, cursor, end) : wholeLine
+        if let bounds = axRect(axParameter(element, "AXBoundsForTextMarkerRange", fragment)) {
+            if bounds.insetBy(dx: -2, dy: -2).contains(point) { return true }
+        }
+        if lastLine { return false }
+        consumed += lineLength
+        cursor = next as! AXTextMarker
+    }
+    return false
+}
+
 private func selectedPointHit(_ element: AXUIElement, pointer: CGPoint,
                               markerRange: CFTypeRef?) -> Bool {
     var point = axPoint(pointer)
@@ -92,65 +137,43 @@ private func selectedPointHit(_ element: AXUIElement, pointer: CGPoint,
                 if let characterValue = AXValueCreate(.cfRange, &character),
                    let boundsValue = axParameter(element, "AXBoundsForRange", characterValue) {
                     var bounds = CGRect.zero
-                    if axValue(boundsValue, type: .cgRect, into: &bounds) {
-                        return bounds.insetBy(dx: -3, dy: -3).contains(point)
-                    }
+                    if axValue(boundsValue, type: .cgRect, into: &bounds),
+                       bounds.width > 0, bounds.height > 0,
+                       bounds.insetBy(dx: -3, dy: -3).contains(point) { return true }
                 }
             }
-            return false
+            // Chromium reports a dummy 0:0 range here. Try text-marker
+            // geometry before declaring the visible selection a miss.
         }
     }
     guard let markerRange,
-          CFGetTypeID(markerRange) == AXTextMarkerRangeGetTypeID(),
-          let pointedMarker = axParameter(element, "AXTextMarkerForPosition", position),
-          CFGetTypeID(pointedMarker) == AXTextMarkerGetTypeID() else {
-        return false
+          CFGetTypeID(markerRange) == AXTextMarkerRangeGetTypeID() else { return false }
+    let range = markerRange as! AXTextMarkerRange
+    if let pointedMarker = axParameter(element, "AXTextMarkerForPosition", position),
+       CFGetTypeID(pointedMarker) == AXTextMarkerGetTypeID() {
+        let start = AXTextMarkerRangeCopyStartMarker(range)
+        let end = AXTextMarkerRangeCopyEndMarker(range)
+        if let pointedIndex = axParameter(element, "AXIndexForTextMarker", pointedMarker) as? NSNumber,
+           let startIndex = axParameter(element, "AXIndexForTextMarker", start) as? NSNumber,
+           let endIndex = axParameter(element, "AXIndexForTextMarker", end) as? NSNumber,
+           pointedIndex.intValue >= startIndex.intValue,
+           pointedIndex.intValue < endIndex.intValue,
+           let next = axParameter(element, "AXTextMarkerForIndex",
+                                  NSNumber(value: pointedIndex.intValue + 1)),
+           CFGetTypeID(next) == AXTextMarkerGetTypeID() {
+            let characterRange = AXTextMarkerRangeCreate(nil,
+                pointedMarker as! AXTextMarker, next as! AXTextMarker)
+            if let bounds = axRect(axParameter(element, "AXBoundsForTextMarkerRange", characterRange)),
+               bounds.insetBy(dx: -3, dy: -3).contains(point) {
+                return true
+            }
+        }
     }
-    let start = AXTextMarkerRangeCopyStartMarker(markerRange as! AXTextMarkerRange)
-    let end = AXTextMarkerRangeCopyEndMarker(markerRange as! AXTextMarkerRange)
-    guard let pointedIndex = axParameter(element, "AXIndexForTextMarker", pointedMarker) as? NSNumber,
-          let startIndex = axParameter(element, "AXIndexForTextMarker", start) as? NSNumber,
-          let endIndex = axParameter(element, "AXIndexForTextMarker", end) as? NSNumber,
-          pointedIndex.intValue >= startIndex.intValue,
-          pointedIndex.intValue < endIndex.intValue else { return false }
-    // WebKit markers can snap to nearby text. Confirm the corresponding glyph's
-    // bounds before accepting a hit, so adjacent lines and trailing space miss.
-    let nextIndex = pointedIndex.intValue + 1
-    let nextNumber = NSNumber(value: nextIndex)
-    guard let next = axParameter(element, "AXTextMarkerForIndex", nextNumber),
-          CFGetTypeID(next) == AXTextMarkerGetTypeID() else {
-        return false
-    }
-    let characterRange = AXTextMarkerRangeCreate(nil, pointedMarker as! AXTextMarker,
-                                                 next as! AXTextMarker)
-    guard let boundsValue = axParameter(element, "AXBoundsForTextMarkerRange", characterRange) else {
-        return false
-    }
-    var bounds = CGRect.zero
-    return axValue(boundsValue, type: .cgRect, into: &bounds) &&
-        bounds.insetBy(dx: -3, dy: -3).contains(point)
+    return selectedMarkerLinesHit(element, range: range, point: point)
 }
 
-// Reading the highlighted text does not change the clipboard or the target app.
-// A short AX timeout keeps an unresponsive app from holding up the lens.
-private func readLiveSelection(at pointer: CGPoint? = nil) -> LiveSelection {
-    guard AXIsProcessTrusted() else {
-        return LiveSelection(text: nil, state: "permission-denied", pointHit: false)
-    }
-    guard let target = NSWorkspace.shared.frontmostApplication,
-          target.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
-        return LiveSelection(text: nil, state: "no-target", pointHit: false)
-    }
-    let application = AXUIElementCreateApplication(target.processIdentifier)
-    AXUIElementSetMessagingTimeout(application, 0.2)
-    var focused: CFTypeRef?
-    let focusError = AXUIElementCopyAttributeValue(
-        application, kAXFocusedUIElementAttribute as CFString, &focused)
-    guard focusError == .success, let focused else {
-        return LiveSelection(text: nil, state: "focus-\(focusError.rawValue)",
-                             pointHit: false)
-    }
-    let element = focused as! AXUIElement
+private func selectionOnElement(_ element: AXUIElement,
+                                pointer: CGPoint?) -> (LiveSelection, Int)? {
     AXUIElementSetMessagingTimeout(element, 0.2)
     var value: CFTypeRef?
     let selectionError = AXUIElementCopyAttributeValue(
@@ -176,14 +199,62 @@ private func readLiveSelection(at pointer: CGPoint? = nil) -> LiveSelection {
     }
     guard let raw,
           !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-        return LiveSelection(text: nil, state: "empty-\(selectionError.rawValue)",
-                             pointHit: false)
+        return nil
     }
     let text = eligibleEnglishText(raw, maxLength: 1200)
-    return LiveSelection(text: text, state: text == nil ? "ineligible" : method,
-                         pointHit: pointer.map {
-                            selectedPointHit(element, pointer: $0, markerRange: markerRange)
-                         } == true)
+    let result = LiveSelection(text: text, state: text == nil ? "ineligible" : method,
+                               pointHit: pointer.map {
+                                   selectedPointHit(element, pointer: $0,
+                                                    markerRange: markerRange)
+                               } == true)
+    return (result, raw.count)
+}
+
+// Reading the highlighted text does not change the clipboard or the target app.
+// Screen hit testing matters: the focused element can be a composer or toolbar
+// while the actual selection belongs to a different web content element.
+private func readLiveSelection(at pointer: CGPoint? = nil,
+                               targetPID: pid_t? = nil) -> LiveSelection {
+    let empty = LiveSelection(text: nil, state: "none", pointHit: false)
+    guard AXIsProcessTrusted() else {
+        return LiveSelection(text: nil, state: "permission-denied", pointHit: false)
+    }
+    guard let pid = targetPID ?? NSWorkspace.shared.frontmostApplication?.processIdentifier,
+          pid != ProcessInfo.processInfo.processIdentifier else {
+        return LiveSelection(text: nil, state: "no-target", pointHit: false)
+    }
+    let application = AXUIElementCreateApplication(pid)
+    AXUIElementSetMessagingTimeout(application, 0.2)
+    var focused: CFTypeRef?
+    AXUIElementCopyAttributeValue(application, kAXFocusedUIElementAttribute as CFString,
+                                  &focused)
+    guard let pointer else {
+        guard let focused else { return empty }
+        return selectionOnElement(focused as! AXUIElement, pointer: nil)?.0 ?? empty
+    }
+    let point = axPoint(pointer)
+    var hit: AXUIElement?
+    var best: (LiveSelection, Int)?
+    if AXUIElementCopyElementAtPosition(application, Float(point.x), Float(point.y),
+                                        &hit) == .success, var element = hit {
+        for _ in 0..<14 {
+            if let candidate = selectionOnElement(element, pointer: pointer) {
+                if candidate.0.pointHit, candidate.1 > (best?.1 ?? -1) {
+                    best = candidate
+                }
+            }
+            var parent: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString,
+                                                &parent) == .success,
+                  let parent else { break }
+            element = parent as! AXUIElement
+        }
+    }
+    if let best { return best.0 }
+    if let focused,
+       let fallback = selectionOnElement(focused as! AXUIElement, pointer: pointer),
+       fallback.0.pointHit { return fallback.0 }
+    return empty
 }
 
 private struct FocusedPassage {
@@ -2172,7 +2243,10 @@ private enum WordMagnifierMain {
         if let index = args.firstIndex(of: "--inspect-selection-point"),
            index + 2 < args.count,
            let x = Double(args[index + 1]), let y = Double(args[index + 2]) {
-            let selection = readLiveSelection(at: CGPoint(x: x, y: y))
+            let pid = args.firstIndex(of: "--target-pid").flatMap {
+                $0 + 1 < args.count ? pid_t(args[$0 + 1]) : nil
+            }
+            let selection = readLiveSelection(at: CGPoint(x: x, y: y), targetPID: pid)
             print("AX_SELECTION_POINT state=\(selection.state) length=\(selection.text?.count ?? 0) hit=\(selection.pointHit)")
             return
         }

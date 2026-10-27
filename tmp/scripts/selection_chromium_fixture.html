@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>EasyLens Chromium selection fixture</title>
+<style>
+  body { margin: 32px; background: #151515; color: white; font: 25px Arial; }
+  main { width: 760px; }
+  p { margin: 0 0 24px; line-height: 1.5; }
+</style>
+<main>
+  <p id="selected">Good morning! Hope your Monday is off to a good start. What can I help you with today? If you are after your morning brief, just say so and I will put it together.</p>
+  <p>Thanks again for the kind words. This line is not selected.</p>
+</main>
+<script>
+  const selection = getSelection();
+  const range = document.createRange();
+  const target = document.getElementById('selected');
+  const params = new URLSearchParams(location.search);
+  if (params.has('end')) {
+    range.setStart(target.firstChild, Number(params.get('start') || 0));
+    range.setEnd(target.firstChild, Number(params.get('end')));
+  } else {
+    range.selectNodeContents(target);
+  }
+  selection.removeAllRanges();
+  selection.addRange(range);
+</script>
