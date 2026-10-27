@@ -14,7 +14,8 @@ import Vision
 private func uptime() -> Double { ProcessInfo.processInfo.systemUptime }
 private func ms(_ start: Double) -> Double { (uptime() - start) * 1_000 }
 
-// Retained for the offline OCR comparison CLI; live selected text bypasses OCR.
+// Retained for the offline OCR comparison CLI; the live visual fallback uses
+// ordinary OCR and compares it with accessibility selection text.
 private func highContrastSelectionImage(_ image: CGImage) -> CGImage? {
     let width = image.width
     let height = image.height
@@ -205,6 +206,26 @@ private func selectionOnElement(_ element: AXUIElement,
             }
         }
     }
+    // Some Chromium accessibility trees expose the complete AXSelectedText but
+    // marker indices and bounds for only the last paragraph. Curiously, asking
+    // for the marker's string can still return the complete text. Verify both
+    // its text and its index span before allowing marker geometry to veto OCR.
+    if let raw, let rangeValue = markerRange,
+       CFGetTypeID(rangeValue) == AXTextMarkerRangeGetTypeID() {
+        let marked = axParameter(element, "AXStringForTextMarkerRange", rangeValue) as? String
+        let range = rangeValue as! AXTextMarkerRange
+        let start = AXTextMarkerRangeCopyStartMarker(range)
+        let end = AXTextMarkerRangeCopyEndMarker(range)
+        let startIndex = axParameter(element, "AXIndexForTextMarker", start) as? NSNumber
+        let endIndex = axParameter(element, "AXIndexForTextMarker", end) as? NSNumber
+        let spanMismatch: Bool
+        if let startIndex, let endIndex {
+            spanMismatch = endIndex.intValue - startIndex.intValue != (raw as NSString).length
+        } else {
+            spanMismatch = false
+        }
+        if marked != raw || spanMismatch { markerRange = nil }
+    }
     guard let raw,
           !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         return nil
@@ -309,6 +330,8 @@ private struct FocusedPassage {
     let sentence: String
     let focusLine: String
     let focusWordIndex: Int
+    let selectionFocusLine: String
+    let selectionFocusWordIndex: Int
     let maskedSentence: String
     let localContext: String
     let maskedLocalContext: String
@@ -692,13 +715,14 @@ private func selectedTextAtFocus(_ hint: String, anchor: String,
                                  focusLine: String, focusWordIndex: Int,
                                  allowShortOCRNoise: Bool = false,
                                  minimumVerifiedWords: Int = 2,
-                                 minimumVerifiedLetters: Int = 0) -> String? {
+                                 minimumVerifiedLetters: Int = 0,
+                                 windowRadius: Int = 2) -> String? {
     guard hint.count <= 1200 else { return nil }
     let selected = clipboardWords(hint).map(foldedLetters)
     let visible = clipboardWords(focusLine).map(foldedLetters)
     guard selected.count > 1, visible.indices.contains(focusWordIndex),
           !visible[focusWordIndex].isEmpty else { return nil }
-    // Clipboard words are authoritative for a copied selection. Vision may
+    // The selected text is authoritative for an active selection. Vision may
     // join "Thanks again" into "Thanksagain" or misread one nearby letter.
     var selectedStarts = [Int]()
     var selectedEnd = 0
@@ -708,8 +732,8 @@ private func selectedTextAtFocus(_ hint: String, anchor: String,
     }
     let source = selected.flatMap { $0 }
     let focus = visible[focusWordIndex]
-    let firstRow = max(0, focusWordIndex - 2)
-    let lastRow = min(visible.count - 1, focusWordIndex + 2)
+    let firstRow = max(0, focusWordIndex - windowRadius)
+    let lastRow = min(visible.count - 1, focusWordIndex + windowRadius)
     for first in selected.indices {
         for last in first..<min(selected.count, first + 4) {
             let start = selectedStarts[first]
@@ -767,6 +791,22 @@ private func selectedTextAtFocus(_ hint: String, anchor: String,
         }
     }
     return nil
+}
+
+private func visuallyConfirmedSelection(_ live: LiveSelection,
+                                        passage: FocusedPassage?) -> Bool {
+    guard let passage, let selected = live.text,
+          !live.geometryAvailable, selected.count >= 20,
+          passage.selectionFocusWordIndex >= 0 else { return false }
+    return [2, 3].contains { radius in
+        selectedTextAtFocus(selected, anchor: passage.anchor,
+                            focusLine: passage.selectionFocusLine,
+                            focusWordIndex: passage.selectionFocusWordIndex,
+                            allowShortOCRNoise: true,
+                            minimumVerifiedWords: 3,
+                            minimumVerifiedLetters: 12,
+                            windowRadius: radius) != nil
+    }
 }
 
 private func hintedOCRCorrection(_ raw: String, hint: String?) -> String? {
@@ -973,16 +1013,43 @@ private func passageAtCenter(_ image: CGImage, focus: CGPoint,
           focused.distance <= 1 else { return (nil, ms(start)) }
     let focusedLine = rows[focused.row].text
     let focusWordIndex: Int
-    if focused.distance <= 0.05 {
+    let focusRow = rows[focused.row].box
+    let rowPadding = min(focusRow.height * 0.25, 0.025)
+    if focusRow.insetBy(dx: -0.003, dy: -rowPadding).contains(focus) {
         focusWordIndex = regex.matches(
             in: focusedLine,
             range: NSRange(location: 0, length: (focusedLine as NSString).length)
         ).firstIndex(where: { NSIntersectionRange($0.range, focused.range).length > 0 }) ?? -1
     } else {
-        // The normal word lens accepts near misses; selection promotion needs
-        // a direct geometric hit so a neighboring compact row cannot win.
+        // Selection promotion needs the center on the OCR line itself;
+        // a nearby word on the row above or below is not enough.
         focusWordIndex = -1
     }
+    // Word choice may favor a glyph on the neighboring row at a line break.
+    // Classify the selection against the row actually under the center, then
+    // use that row's nearest recognized word only as a text alignment anchor.
+    let centerRows = rows.indices.filter { index in
+        let box = rows[index].box
+        let padding = min(box.height * 0.25, 0.025)
+        return box.insetBy(dx: -0.003, dy: -padding).contains(focus)
+    }
+    let selectionRow = centerRows.min {
+        let a = rows[$0].box
+        let b = rows[$1].box
+        let aGap = max(a.minY - focus.y, 0, focus.y - a.maxY)
+        let bGap = max(b.minY - focus.y, 0, focus.y - b.maxY)
+        return aGap == bGap ? abs(a.midY - focus.y) < abs(b.midY - focus.y) : aGap < bGap
+    }
+    let selectionWord = selectionRow.flatMap { index in
+        found.filter { $0.row == index }.min { $0.distance < $1.distance }
+    }
+    let selectionFocusLine = selectionRow.map { rows[$0].text } ?? ""
+    let selectionFocusWordIndex = selectionWord.flatMap { word in
+        regex.matches(in: selectionFocusLine,
+                      range: NSRange(location: 0,
+                                     length: (selectionFocusLine as NSString).length))
+            .firstIndex { NSIntersectionRange($0.range, word.range).length > 0 }
+    } ?? -1
 
     if let literal = focused.literalTranslation {
         let masked = (focused.anchor as NSString).replacingCharacters(
@@ -990,6 +1057,8 @@ private func passageAtCenter(_ image: CGImage, focus: CGPoint,
             with: focusMarker)
         return (FocusedPassage(anchor: focused.anchor, sentence: focused.anchor,
                                focusLine: focusedLine, focusWordIndex: focusWordIndex,
+                               selectionFocusLine: selectionFocusLine,
+                               selectionFocusWordIndex: selectionFocusWordIndex,
                                maskedSentence: masked, localContext: focused.anchor,
                                maskedLocalContext: masked, microContext: focused.anchor,
                                maskedMicroContext: masked, prefixContext: focused.anchor,
@@ -1207,6 +1276,8 @@ private func passageAtCenter(_ image: CGImage, focus: CGPoint,
                     length: focusRange.length), with: focusMarker)
     return (FocusedPassage(anchor: focused.anchor, sentence: sentence,
                            focusLine: focusedLine, focusWordIndex: focusWordIndex,
+                           selectionFocusLine: selectionFocusLine,
+                           selectionFocusWordIndex: selectionFocusWordIndex,
                            maskedSentence: masked, localContext: local,
                            maskedLocalContext: maskedLocal,
                            microContext: micro, maskedMicroContext: maskedMicro,
@@ -1492,6 +1563,7 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
     private var clipboardHintMisses = 0
     private var activeSelectionHint: String?
     private var activeSelectionSource = "none"
+    private var lastConfirmedSelectionAt = 0.0
     private var selectionRequestID = 0
     private var pendingSelectionText: String?
     private var selectionCache: [String: String] = [:]
@@ -1685,6 +1757,7 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
         clipboardHintMisses = 0
         activeSelectionHint = nil
         activeSelectionSource = "none"
+        lastConfirmedSelectionAt = 0
         selectionRequestID += 1
         pendingSelectionText = nil
         showingSelectionCard = false
@@ -1729,6 +1802,7 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
         clipboardHintMisses = 0
         activeSelectionHint = nil
         activeSelectionSource = "none"
+        lastConfirmedSelectionAt = 0
         selectionRequestID += 1
         pendingSelectionText = nil
         showingSelectionCard = false
@@ -1901,8 +1975,10 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
     // AX text. The visual fallback verifies location before calling this.
     private func handleSelectedPointHit(_ live: LiveSelection, pointer: CGPoint,
                                         generation current: Int,
-                                        sourceName: String = "accessibility") -> Bool {
+                                        sourceName: String = "accessibility",
+                                        confirmedByAX: Bool = true) -> Bool {
         guard panel.isVisible, current == generation, live.pointHit else { return false }
+        if confirmedByAX { lastConfirmedSelectionAt = uptime() }
         let selected = live.text
         if activeSelectionHint != selected || activeSelectionSource != sourceName {
             selectionRequestID += 1
@@ -1918,7 +1994,8 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
         pendingTranslationKey = nil
         view.isReading = false
         inspectedGeneration = -1
-        nextInspectionAt = uptime() + (sourceName == "accessibility-visual" ? 0.6 : 0.3)
+        nextInspectionAt = uptime() + (confirmedByAX ?
+            (sourceName == "accessibility-visual" ? 0.6 : 0.3) : 0.2)
         if let selected, let cached = selectionCache[selected] {
             showSelectionCard(cached, pointer: pointer)
         } else if let selected, pendingSelectionText != selected {
@@ -2059,19 +2136,27 @@ private final class WordMagnifierProbe: NSObject, NSApplicationDelegate {
             guard panel.isVisible, current == generation else { return }
             let live = readLiveSelection(at: pointer)
             if handleSelectedPointHit(live, pointer: pointer, generation: current) { return }
-            if let passage, let selected = live.text,
-               !live.geometryAvailable, selected.count >= 20,
-               passage.focusWordIndex >= 0,
-               selectedTextAtFocus(selected, anchor: passage.anchor,
-                                   focusLine: passage.focusLine,
-                                   focusWordIndex: passage.focusWordIndex,
-                                   allowShortOCRNoise: true,
-                                   minimumVerifiedWords: 3,
-                                   minimumVerifiedLetters: 14) != nil {
-                let visual = LiveSelection(text: selected, state: live.state,
+            if visuallyConfirmedSelection(live, passage: passage) {
+                let visual = LiveSelection(text: live.text, state: live.state,
                                            pointHit: true, geometryAvailable: false)
                 if handleSelectedPointHit(visual, pointer: pointer, generation: current,
                                           sourceName: "accessibility-visual") { return }
+            }
+            // An AX read can fail for one frame while the selection is still
+            // visible. Keep the established mode only while the OCR row still
+            // matches that same text, and re-query AX soon. A new word or page
+            // content fails this check immediately; the grace period cannot
+            // renew itself without a successful AX read.
+            if live.text == nil, activeSelectionSource == "accessibility-visual",
+               uptime() - lastConfirmedSelectionAt < 1.0,
+               let previous = activeSelectionHint {
+                let provisional = LiveSelection(text: previous, state: "ax-transient",
+                                                pointHit: true, geometryAvailable: false)
+                if visuallyConfirmedSelection(provisional, passage: passage),
+                   handleSelectedPointHit(provisional, pointer: pointer,
+                                          generation: current,
+                                          sourceName: "accessibility-visual",
+                                          confirmedByAX: false) { return }
             }
             let source = "none"
             let selectionHint: String? = nil
@@ -2412,6 +2497,33 @@ private enum WordMagnifierMain {
                                     allowShortOCRNoise: args.contains("--trusted-selection"))
             }
             print("SELECTION_FOCUS_INSPECTION promotes=\(selected != nil)")
+            return
+        }
+        if let index = args.firstIndex(of: "--inspect-selection-image"),
+           index + 3 < args.count,
+           let x = Double(args[index + 2]), let y = Double(args[index + 3]),
+           let source = CGImageSourceCreateWithURL(
+               URL(fileURLWithPath: args[index + 1]) as CFURL, nil),
+           let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+            let width = min(1800.0, Double(image.width))
+            let height = min(220.0, Double(image.height))
+            let area = CGRect(x: max(0, min(x - width / 2, Double(image.width) - width)),
+                              y: max(0, min(y - height / 2, Double(image.height) - height)),
+                              width: width, height: height).integral
+            if let cropped = image.cropping(to: area) {
+                let focus = CGPoint(x: (x - area.minX) / area.width,
+                                    y: 1 - (y - area.minY) / area.height)
+                let pointer = CGPoint(x: x / 2, y: (Double(image.height) - y) / 2)
+                let pid = args.firstIndex(of: "--target-pid").flatMap {
+                    $0 + 1 < args.count ? pid_t(args[$0 + 1]) : nil
+                }
+                let live = readLiveSelection(at: pointer, targetPID: pid)
+                do {
+                    let (passage, _) = try passageAtCenter(cropped, focus: focus,
+                        debug: args.contains("--show-ocr"))
+                    print("SELECTION_IMAGE axState=\(live.state) length=\(live.text?.count ?? 0) geometry=\(live.geometryAvailable) anchor=\(passage?.anchor ?? "none") focusIndex=\(passage?.focusWordIndex ?? -1) selectionIndex=\(passage?.selectionFocusWordIndex ?? -1) distance=\(passage?.distance ?? -1) matched=\(visuallyConfirmedSelection(live, passage: passage))")
+                } catch { print("SELECTION_IMAGE_ERROR=\(error)") }
+            }
             return
         }
         if let index = args.firstIndex(of: "--inspect-image"), index + 3 < args.count,

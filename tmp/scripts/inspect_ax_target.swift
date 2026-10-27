@@ -111,10 +111,11 @@ func describe(_ label: String, _ start: AXUIElement?, _ point: CGPoint?) {
         let role = attribute(element, kAXRoleAttribute as String) as? String ?? "?"
         let selected = attribute(element, kAXSelectedTextAttribute as String) as? String
         let marker = attribute(element, "AXSelectedTextMarkerRange")
+        let marked = marker.flatMap { parameter(element, "AXStringForTextMarkerRange", $0) as? String }
         let selectedRange = attribute(element, kAXSelectedTextRangeAttribute as String)
         let range = selectedRange != nil ? "yes" : "no"
         let markerState = marker != nil ? "yes" : "no"
-        print("\(label)[\(depth)] role=\(role) selectedLength=\(selected?.count ?? 0) range=\(range) marker=\(markerState)")
+        print("\(label)[\(depth)] role=\(role) selectedLength=\(selected?.count ?? 0) range=\(range) marker=\(markerState) markerLength=\(marked?.count ?? 0) markerEqualsSelected=\(marked != nil && marked == selected)")
         if (selected?.isEmpty == false), let point {
             print("  \(geometry(element, point))")
         }
