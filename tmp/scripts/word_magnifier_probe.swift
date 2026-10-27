@@ -1620,10 +1620,12 @@ private final class EyeLensView: NSView {
         eye.addClip()
         for index in 0..<8 {
             let progress = CGFloat(index) / 7
-            let start = CGPoint(x: center.x + irisRadiusX * (0.48 + 0.47 * progress),
-                                y: center.y + irisRadiusY * (0.74 - 0.90 * progress))
-            let end = CGPoint(x: eyeRect.maxX - CGFloat(index),
+            let lastFold = index == 7
+            let end = CGPoint(x: eyeRect.maxX - CGFloat(index) - (lastFold ? 2 : 0),
                               y: eyeRect.midY + 2 - 0.7 * CGFloat(index))
+            let start = CGPoint(x: center.x + irisRadiusX * (0.48 + 0.47 * progress),
+                                y: lastFold ? end.y + 0.8
+                                    : center.y + irisRadiusY * (0.74 - 0.90 * progress))
             let dx = end.x - start.x
             let dy = start.y - end.y
             let line = NSBezierPath()
@@ -1631,9 +1633,10 @@ private final class EyeLensView: NSView {
             line.curve(to: end,
                        controlPoint1: CGPoint(x: start.x + dx * 0.32, y: start.y - dy * 0.08),
                        controlPoint2: CGPoint(x: end.x - dx * 0.22, y: end.y + dy * 0.23))
-            line.lineWidth = 0.62
+            line.lineWidth = lastFold ? 0.5 : 0.62
             line.lineCapStyle = .round
-            NSColor(calibratedWhite: 0.96, alpha: 0.22 - 0.013 * CGFloat(index)).setStroke()
+            let alpha = lastFold ? 0.06 : 0.22 - 0.013 * CGFloat(index)
+            NSColor(calibratedWhite: 0.96, alpha: alpha).setStroke()
             line.stroke()
         }
         context.restoreGState()
