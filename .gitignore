@@ -20,6 +20,7 @@ tmp/
 *.log
 
 # Build and test outputs
+.build/
 dist/
 build/
 out/

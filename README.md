@@ -1,25 +1,31 @@
 # EasyLens
 
-EasyLens 是一个规划中的桌面 AI 识别客户端。用户通过快捷键唤起一个类似系统放大镜的小型遮罩窗口；窗口覆盖区域下方的内容是识别对象。首个敏捷迭代只验证**英文文字识别并翻译成中文**，识别到的非英文内容跳过后续翻译流程。
+EasyLens 是 macOS 菜单栏中的本地英译中应用。按 **⌃⌥L** 唤出跟随鼠标的透明眼睛，停留在英文单词上可查看中文；鼠标中心落在已选文字上时，优先翻译完整选区。按 **Esc** 隐藏眼睛。非英文内容不进入翻译流程。
 
-仓库目前只完成项目初始化和需求边界记录，尚无可运行客户端。平台、界面实现、文字识别、语言判断和翻译方案均待调研与实验后确定。
+当前实现使用 macOS 15 及以上系统的 ScreenCaptureKit、Vision、Accessibility 和 Translation；不调用云端 LLM，也不保存截图。应用只在菜单栏显示，Dock 中没有图标。
 
-## 当前目标
+## 构建与运行
 
-1. 快捷键唤起并定位识别窗口。
-2. 获取窗口覆盖位置下方的内容，识别其中的文字。
-3. 仅将判定为英文的文字送入英译中流程；非英文内容跳过。
-4. 在客户端向用户呈现中文结果。
+需要 macOS 15+、Xcode 16+。仓库无第三方依赖。
 
-花纹、Logo、人物等其他识别形态属于后续探索范围，不属于首个迭代的交付内容。
+```sh
+sh scripts/run-app.sh --show-on-launch
+```
+
+构建产物为 `build/EasyLens.app`。单独构建和运行：
+
+```sh
+sh scripts/build-app.sh
+open build/EasyLens.app
+swift test
+```
+
+首次使用如缺少英语或简体中文翻译资源，EasyLens 会显示说明窗口。点击「下载语言」后，macOS 会要求确认下载；可从菜单栏的「英中翻译语言」项随时重新检查。屏幕读取需要系统授权；选区增强还需要在 macOS 的隐私与安全性设置中授予辅助功能权限。
 
 ## 仓库入口
 
-- [AGENTS.md](AGENTS.md)：协作与变更约定；[AGENT.md](AGENT.md) 是兼容入口。
-- [docs/README.md](docs/README.md)：文档导航。
-- [docs/product-scope.md](docs/product-scope.md)：产品目标、首个迭代边界和待验证问题。
-- [docs/research-plan.md](docs/research-plan.md)：后续调研与迁移实验的记录方式。
+- [docs/engineering.md](docs/engineering.md)：当前架构、语言准备、权限和验证边界。
+- [docs/product-scope.md](docs/product-scope.md)：已实现的首个产品范围与后续方向。
+- [AGENTS.md](AGENTS.md)：协作和检查约定。
 
-本地探索使用 `tmp/docs/` 存放调研草稿，`tmp/scripts/` 存放轻量实验脚本。Git 只保留这两个目录的占位文件，忽略其中的工作内容；定稿内容整理后归档到 `docs/`。
-
-当前不提供安装、构建或运行命令。确定技术选型并建立可运行工程后，再补充对应命令和验证流程。
+`Sources/EasyLens/` 是正式源码；`tmp/scripts/` 保留前期实验与回归材料，不再是应用构建入口。当前 `.app` 仅使用本地临时签名，尚未做正式发布签名、公证或自动更新。
