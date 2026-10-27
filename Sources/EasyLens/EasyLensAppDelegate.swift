@@ -1,5 +1,6 @@
 // Migrated from the validated macOS lens prototype.
 import AppKit
+import ApplicationServices
 import Carbon.HIToolbox
 import Darwin
 import ScreenCaptureKit
@@ -15,6 +16,12 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
     private var languageMenuItem: NSMenuItem!
     private var languageSetupTimer: Timer?
     private var hasPresentedLanguageSetup = false
+    private var accessibilityMenuItem: NSMenuItem!
+    private var accessibilityTimer: Timer?
+    private var hasPresentedAccessibilitySetup = false
+    private var accessibilityTrusted: Bool?
+    private var selectionTargetPID: pid_t?
+    private var applicationActivationObserver: NSObjectProtocol?
     private var panel: NSPanel!
     private var translationPanel: NSPanel!
     private var contextLabel: NSTextField!
@@ -57,6 +64,7 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
     private var pendingSelectionText: String?
     private var selectionCache: [String: String] = [:]
     private var showingSelectionCard = false
+    private var lastSelectionDiagnostic: String?
     private var fixedPoint: CGPoint? {
         let args = CommandLine.arguments
         guard let index = args.firstIndex(of: "--fixed-point"), index + 2 < args.count,
@@ -181,12 +189,32 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
                                       action: #selector(showLanguageSetup), keyEquivalent: "")
         languageMenuItem.target = self
         menu.addItem(languageMenuItem)
+        accessibilityMenuItem = NSMenuItem(title: "选区识别：检查权限…",
+                                           action: #selector(showAccessibilitySetup),
+                                           keyEquivalent: "")
+        accessibilityMenuItem.target = self
+        menu.addItem(accessibilityMenuItem)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "退出 EasyLens", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
         statusItem.menu = menu
         installHotKeys()
+        rememberSelectionTarget(NSWorkspace.shared.frontmostApplication)
+        applicationActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil,
+            queue: .main) { [weak self] notification in
+                let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                    as? NSRunningApplication
+                Task { @MainActor [weak self] in
+                    self?.rememberSelectionTarget(application)
+                }
+            }
+        updateAccessibilityStatus()
+        accessibilityTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) {
+            [weak self] _ in
+            Task { @MainActor [weak self] in self?.updateAccessibilityStatus() }
+        }
         print("EASYLENS_READY ⌃⌥L toggles eye lens; Esc hides; EL◉ menu quits")
         print("NO_CLOUD_CALLS screenshots_saved=0")
         fflush(stdout)
@@ -219,6 +247,10 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         timer?.invalidate()
         languageSetupTimer?.invalidate()
+        accessibilityTimer?.invalidate()
+        if let applicationActivationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(applicationActivationObserver)
+        }
         if let showHotKey { UnregisterEventHotKey(showHotKey) }
         if let escapeHotKey { UnregisterEventHotKey(escapeHotKey) }
         if let hotKeyHandler { RemoveEventHandler(hotKeyHandler) }
@@ -265,6 +297,59 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
         if status != noErr { print("ERROR Escape hotkey status=\(status)") }
     }
 
+    private func rememberSelectionTarget(_ application: NSRunningApplication?) {
+        guard let application,
+              application.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+            return
+        }
+        selectionTargetPID = application.processIdentifier
+    }
+
+    private func updateAccessibilityStatus() {
+        let trusted = AXIsProcessTrusted()
+        accessibilityMenuItem.title = trusted ? "选区识别：已授权" :
+            "选区识别：需要辅助功能权限…"
+        accessibilityMenuItem.isEnabled = !trusted
+        guard trusted != accessibilityTrusted else { return }
+        accessibilityTrusted = trusted
+        NSLog("EASYLENS_ACCESSIBILITY trusted=%@", trusted ? "yes" : "no")
+        if trusted {
+            inspectedGeneration = -1
+            nextInspectionAt = 0
+        }
+    }
+
+    private func recordSelectionDiagnostic(_ selection: LiveSelection) {
+        let status = "state=\(selection.state) length=\(selection.text?.count ?? 0) hit=\(selection.pointHit) targetPID=\(selectionTargetPID ?? 0)"
+        guard status != lastSelectionDiagnostic else { return }
+        lastSelectionDiagnostic = status
+        NSLog("EASYLENS_SELECTION %@", status)
+    }
+
+    @objc private func showAccessibilitySetup() {
+        _ = presentAccessibilitySetup()
+    }
+
+    // Returns true when the user chose Settings, so the lens can stay hidden
+    // while macOS displays the permission controls.
+    private func presentAccessibilitySetup() -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "开启完整选区翻译"
+        alert.informativeText = "完整选区翻译需要“辅助功能”权限，以读取所选文字并确认眼睛中心位于选区内。未授权时仍可翻译单词。请在“系统设置 → 隐私与安全性 → 辅助功能”允许 EasyLens。"
+        alert.addButton(withTitle: "打开系统设置")
+        alert.addButton(withTitle: "暂时使用单词翻译")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+            as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
+        if let url = URL(string:
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
+        return true
+    }
+
     private func releaseEscape() {
         if let escapeHotKey { UnregisterEventHotKey(escapeHotKey); self.escapeHotKey = nil }
     }
@@ -274,6 +359,11 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showLens() {
+        rememberSelectionTarget(NSWorkspace.shared.frontmostApplication)
+        if !AXIsProcessTrusted(), !hasPresentedAccessibilitySetup {
+            hasPresentedAccessibilitySetup = true
+            if presentAccessibilitySetup() { return }
+        }
         Task { await languageSetup.refresh() }
         let pointer = fixedPoint ?? NSEvent.mouseLocation
         let pasteboard = NSPasteboard.general
@@ -531,13 +621,13 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
             let pointer = fixedPoint ?? NSEvent.mouseLocation
             let stillSelected: Bool
             if activeSelectionSource == "accessibility" {
-                let live = readLiveSelection(at: pointer)
+                let live = readLiveSelection(at: pointer, targetPID: selectionTargetPID)
                 stillSelected = live.pointHit && live.text == source
             } else {
                 // The pixel hit was checked in the same pointer generation.
                 // Movement or a changed AX selection invalidates it; the next
                 // scan can use the cache after checking the visible frame.
-                let live = readLiveSelection(at: pointer)
+                let live = readLiveSelection(at: pointer, targetPID: selectionTargetPID)
                 stillSelected = activeSelectionSource == "accessibility-visual" &&
                     selectionHitGeneration == generation && live.text == source &&
                     hypot(pointer.x - selectionHitPointer.x,
@@ -645,6 +735,7 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func tick() {
         guard panel.isVisible else { return }
+        rememberSelectionTarget(NSWorkspace.shared.frontmostApplication)
         let pointer = fixedPoint ?? NSEvent.mouseLocation
         pollClipboard()
         if clipboardHint != nil && uptime() >= clipboardHintDeadline {
@@ -714,7 +805,9 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
                 return LiveSelection(text: selection.text, state: selection.state,
                                      pointHit: false, geometryAvailable: false)
             }
-            let initialSelection = visualOnly(readLiveSelection(at: pointer))
+            let initialSelection = visualOnly(readLiveSelection(at: pointer,
+                                                               targetPID: selectionTargetPID))
+            recordSelectionDiagnostic(initialSelection)
             if handleSelectedPointHit(initialSelection, pointer: pointer, generation: current) {
                 return
             }
@@ -750,7 +843,9 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
                 return try passageAtCenter(scanImage, focus: focus, clipboardHint: hint)
             }.value
             guard panel.isVisible, current == generation else { return }
-            let live = visualOnly(readLiveSelection(at: pointer))
+            let live = visualOnly(readLiveSelection(at: pointer,
+                                                    targetPID: selectionTargetPID))
+            recordSelectionDiagnostic(live)
             if handleSelectedPointHit(live, pointer: pointer, generation: current) { return }
             let candidate = live.text == nil ? initialSelection : live
             if visuallyConfirmedSelection(candidate, passage: passage,
@@ -876,7 +971,8 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
               let currentSentence, let currentAnchor else { return }
         pendingTranslationKey = nil
         if activeSelectionSource != "none" ||
-           readLiveSelection(at: fixedPoint ?? NSEvent.mouseLocation).pointHit { return }
+           readLiveSelection(at: fixedPoint ?? NSEvent.mouseLocation,
+                             targetPID: selectionTargetPID).pointHit { return }
         switch result {
         case .success(let (translation, elapsed)):
             translationFailures = 0
