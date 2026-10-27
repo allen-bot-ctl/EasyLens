@@ -1603,13 +1603,12 @@ private final class EyeLensView: NSView {
         lowerLid.lineWidth = 0.75
         NSColor(calibratedWhite: 0.96, alpha: 0.22).setStroke()
         lowerLid.stroke()
-        // Two quiet neutral strokes keep the contour legible on both light and
-        // dark content without turning the gaze target into a persistent badge.
+        // Keep the resting contour barely visible; the yellow stroke marks lock-on.
         eye.lineWidth = 1.8
         NSColor(calibratedWhite: 0.02, alpha: 0.02).setStroke()
         eye.stroke()
         eye.lineWidth = 0.8
-        NSColor(calibratedWhite: 0.96, alpha: 0.45).setStroke()
+        NSColor(calibratedWhite: 0.96, alpha: 0.02).setStroke()
         eye.stroke()
         if hasTranslation {
             eye.lineWidth = 1.4
