@@ -33,7 +33,7 @@ jobs:
         run: npm test
 
       - name: Build Linux AppImage and directory bundle
-        run: npx electron-builder --linux AppImage dir
+        run: npx electron-builder --linux AppImage dir --publish never
 
       - name: Package unpacked directory
         run: |
