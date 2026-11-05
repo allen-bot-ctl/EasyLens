@@ -172,6 +172,200 @@ func selectedPointHit(_ element: AXUIElement, pointer: CGPoint,
     return selectedMarkerLinesHit(element, range: range, point: point)
 }
 
+private let inlineAXRoles: Set<String> = [
+    "AXStaticText", "AXListMarker", "AXLink", "AXButton", "AXImage",
+    "AXMenuButton", "AXPopUpButton", "AXCheckBox", "AXRadioButton",
+    "AXStyleGroup", "AXInline"
+]
+
+private final class StructuredSelectionCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entry: (raw: String, structured: String)?
+
+    func get(for raw: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return entry?.raw == raw ? entry?.structured : nil
+    }
+
+    func set(raw: String, structured: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        entry = (raw, structured)
+    }
+}
+
+private let structuredSelectionCache = StructuredSelectionCache()
+
+func matchSelectionInBlocks(raw: String, blocks: [String]) -> String? {
+    let trimmedRaw = raw
+        .replacingOccurrences(of: "\u{FFFC}", with: "")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedRaw.isEmpty, blocks.count > 1 else { return nil }
+    var concatenated = ""
+    var ranges: [(range: NSRange, block: String)] = []
+    var offset = 0
+    for block in blocks where !block.isEmpty {
+        let cleanedBlock = block.replacingOccurrences(of: "\u{FFFC}", with: "")
+        guard !cleanedBlock.isEmpty else { continue }
+        let len = (cleanedBlock as NSString).length
+        ranges.append((NSRange(location: offset, length: len), cleanedBlock))
+        concatenated += cleanedBlock
+        offset += len
+    }
+    let fullNS = concatenated as NSString
+    let matchRange = fullNS.range(of: trimmedRaw)
+    guard matchRange.location != NSNotFound, matchRange.length > 0 else {
+        return nil
+    }
+    let matchStart = matchRange.location
+    let matchEnd = matchRange.location + matchRange.length
+    var selectedParagraphs: [String] = []
+    for (blockRange, block) in ranges {
+        let blockStart = blockRange.location
+        let blockEnd = blockRange.location + blockRange.length
+        guard blockEnd > matchStart && blockStart < matchEnd else { continue }
+        let sliceStart = max(0, matchStart - blockStart)
+        let sliceEnd = min(blockRange.length, matchEnd - blockStart)
+        guard sliceEnd > sliceStart else { continue }
+        let nsBlock = block as NSString
+        var slice = nsBlock.substring(with: NSRange(location: sliceStart, length: sliceEnd - sliceStart))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if sliceStart > 0 && sliceStart <= 3 {
+            let prefix = nsBlock.substring(to: sliceStart).trimmingCharacters(in: .whitespaces)
+            if prefix == "•" || prefix == "◦" || prefix == "▪" {
+                slice = "\(prefix) \(slice)"
+            }
+        }
+        if !slice.isEmpty {
+            selectedParagraphs.append(slice)
+        }
+    }
+    guard selectedParagraphs.count > 1 else { return nil }
+    return selectedParagraphs.joined(separator: "\n")
+}
+
+private func collectAXBlocks(from container: AXUIElement, maxNodes: Int = 500) -> [String] {
+    var blocks: [String] = []
+    var currentBlock = ""
+    var visited = 0
+
+    func flushBlock() {
+        if !currentBlock.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            blocks.append(currentBlock)
+        }
+        currentBlock = ""
+    }
+
+    func walk(_ node: AXUIElement, depth: Int) {
+        guard depth <= 12, visited < maxNodes else { return }
+        visited += 1
+        AXUIElementSetMessagingTimeout(node, 0.1)
+        var roleRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(node, kAXRoleAttribute as CFString, &roleRef)
+        let role = (roleRef as? String) ?? ""
+
+        if role == "AXStaticText" || role == "AXListMarker" {
+            var valueRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(node, kAXValueAttribute as CFString, &valueRef) == .success,
+               let text = valueRef as? String, !text.isEmpty {
+                currentBlock += text
+            }
+            return
+        }
+
+        let isInline = inlineAXRoles.contains(role)
+        if !isInline {
+            flushBlock()
+        }
+
+        var childrenRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(node, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+           let children = childrenRef as? [AXUIElement], !children.isEmpty {
+            let slice: ArraySlice<AXUIElement>
+            if children.count > 30 {
+                if let selIdx = children.firstIndex(where: { child in
+                    var selVal: CFTypeRef?
+                    return AXUIElementCopyAttributeValue(child, kAXSelectedTextAttribute as CFString, &selVal) == .success &&
+                        (selVal as? String)?.isEmpty == false
+                }) {
+                    let low = max(0, selIdx - 15)
+                    let high = min(children.count, selIdx + 25)
+                    slice = children[low..<high]
+                } else {
+                    slice = children.prefix(40)
+                }
+            } else {
+                slice = children[...]
+            }
+            for child in slice {
+                walk(child, depth: depth + 1)
+            }
+        }
+
+        if !isInline {
+            flushBlock()
+        }
+    }
+
+    walk(container, depth: 0)
+    flushBlock()
+    return blocks
+}
+
+private func structuredSelectionText(from element: AXUIElement, raw: String) -> String {
+    guard !raw.contains("\n") else { return raw }
+    if let cached = structuredSelectionCache.get(for: raw) {
+        return cached
+    }
+
+    // Build candidate containers from deepest selected descendant up to ancestors.
+    var chain: [AXUIElement] = [element]
+    var current = element
+    for _ in 0..<6 {
+        var childrenRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(current, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+              let children = childrenRef as? [AXUIElement],
+              let selectedChild = children.first(where: { child in
+                  var selVal: CFTypeRef?
+                  return AXUIElementCopyAttributeValue(child, kAXSelectedTextAttribute as CFString, &selVal) == .success &&
+                      (selVal as? String) == raw
+              }) else { break }
+        chain.append(selectedChild)
+        current = selectedChild
+    }
+
+    var ancestors: [AXUIElement] = []
+    var parentCursor = element
+    for _ in 0..<6 {
+        var parentRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(parentCursor, kAXParentAttribute as CFString, &parentRef) == .success,
+              let parentRef else { break }
+        let parent = parentRef as! AXUIElement
+        ancestors.append(parent)
+        parentCursor = parent
+    }
+
+    // Search from more specific containers up to broader document containers.
+    let candidates = Array(chain.reversed()) + ancestors
+    for candidate in candidates {
+        var roleRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(candidate, kAXRoleAttribute as CFString, &roleRef)
+        let role = (roleRef as? String) ?? ""
+        if role == "AXStaticText" || role == "AXLink" || role == "AXListMarker" {
+            continue
+        }
+        let blocks = collectAXBlocks(from: candidate)
+        if let matched = matchSelectionInBlocks(raw: raw, blocks: blocks) {
+            structuredSelectionCache.set(raw: raw, structured: matched)
+            return matched
+        }
+    }
+
+    structuredSelectionCache.set(raw: raw, structured: raw)
+    return raw
+}
+
 func selectionOnElement(_ element: AXUIElement,
                                 pointer: CGPoint?) -> (LiveSelection, Int)? {
     AXUIElementSetMessagingTimeout(element, 0.2)
@@ -221,7 +415,8 @@ func selectionOnElement(_ element: AXUIElement,
           !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         return nil
     }
-    let text = eligibleEnglishText(raw, maxLength: 1200)
+    let structured = structuredSelectionText(from: element, raw: raw)
+    let text = eligibleEnglishText(structured, maxLength: 1200)
     let geometry = pointer.map {
         selectedPointHit(element, pointer: $0, markerRange: markerRange)
     } ?? .unavailable

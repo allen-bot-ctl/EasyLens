@@ -20,6 +20,10 @@ enum EasyLensMain {
             }
             let selection = readLiveSelection(at: CGPoint(x: x, y: y), targetPID: pid)
             print("AX_SELECTION_POINT state=\(selection.state) length=\(selection.text?.count ?? 0) hit=\(selection.pointHit)")
+            if args.contains("--dump-selection"), let text = selection.text {
+                let paragraphCount = text.components(separatedBy: "\n").count
+                print("AX_SELECTION_PARAGRAPHS=\(paragraphCount) text=\(String(reflecting: text))")
+            }
             return
         }
         if let index = args.firstIndex(of: "--translate-selection"), index + 1 < args.count {

@@ -77,8 +77,9 @@ final class SelectionTranslationSelfTest: NSObject, NSApplicationDelegate {
         bridge.onResult = { _, result in
             switch result {
             case .success(let (translated, elapsed)):
+                let formatted = formatSelectionTranslation(translated, source: self.source)
                 print(String(format: "SELECTION_SELF_TEST result=%@ translatedMs=%.1f",
-                             translated, elapsed))
+                             formatted, elapsed))
             case .failure(let error):
                 print("SELECTION_SELF_TEST_ERROR=\(error)")
             }

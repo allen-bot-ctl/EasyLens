@@ -343,8 +343,41 @@ func englishDominant(_ text: String) -> Bool {
     return han == 0 ? latin > 0 : latin >= max(12, han * 3)
 }
 
+func normalizeSourceSelectionParagraphs(_ raw: String) -> String {
+    let cleaned = raw
+        .replacingOccurrences(of: "\u{FFFC}", with: "")
+        .replacingOccurrences(of: "\r\n", with: "\n")
+        .replacingOccurrences(of: "\r", with: "\n")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !cleaned.isEmpty else { return "" }
+
+    let bulletChars = CharacterSet(charactersIn: "•◦▪")
+    var paragraphs: [String] = []
+    for rawLine in cleaned.components(separatedBy: "\n") {
+        let line = rawLine.trimmingCharacters(in: .whitespaces)
+        guard !line.isEmpty else { continue }
+        // Split inline bullet markers (e.g. "...services• What we expect...")
+        let parts = line.components(separatedBy: bulletChars)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        if parts.count >= 2, line.unicodeScalars.contains(where: { bulletChars.contains($0) }) {
+            let startsWithBullet = line.unicodeScalars.first.map { bulletChars.contains($0) } ?? false
+            for (index, part) in parts.enumerated() {
+                if index == 0 && !startsWithBullet && part.hasSuffix(":") {
+                    paragraphs.append(part)
+                } else {
+                    paragraphs.append("• \(part)")
+                }
+            }
+        } else {
+            paragraphs.append(line)
+        }
+    }
+    return paragraphs.joined(separator: "\n")
+}
+
 func eligibleEnglishText(_ raw: String, maxLength: Int) -> String? {
-    let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    let text = normalizeSourceSelectionParagraphs(raw)
     guard (2...maxLength).contains(text.count),
           text.range(of: "[A-Za-z]", options: .regularExpression) != nil,
           !looksLikePathOrCode(text), !text.contains("{") && !text.contains("}") else {
@@ -368,6 +401,99 @@ func eligibleEnglishText(_ raw: String, maxLength: Int) -> String? {
 
 func eligibleClipboardHint(_ raw: String) -> String? {
     eligibleEnglishText(raw, maxLength: 400)
+}
+
+func formatSelectionTranslation(_ text: String, source: String? = nil) -> String {
+    var raw = text
+        .replacingOccurrences(of: "\u{FFFC}", with: "")
+        .replacingOccurrences(of: "\r\n", with: "\n")
+        .replacingOccurrences(of: "\r", with: "\n")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+
+    guard !raw.isEmpty else { return "" }
+
+    // Strip outer matched quotation marks if the model quoted the full translation
+    if (raw.hasPrefix("\"") && raw.hasSuffix("\"") && raw.count >= 2) ||
+       (raw.hasPrefix("“") && raw.hasSuffix("”") && raw.count >= 2) {
+        raw = String(raw.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    let sourceBulletCount = source.map { src in
+        src.components(separatedBy: "\n").filter {
+            let t = $0.trimmingCharacters(in: .whitespaces)
+            return t.hasPrefix("•") || t.hasPrefix("◦") || t.hasPrefix("▪")
+        }.count
+    } ?? 0
+
+    let bulletChars = CharacterSet(charactersIn: "•◦▪")
+    var paragraphs: [String] = []
+
+    for rawLine in raw.components(separatedBy: "\n") {
+        var current = rawLine.trimmingCharacters(in: .whitespaces)
+        guard !current.isEmpty else { continue }
+
+        if current.hasPrefix("#") {
+            current = current.replacingOccurrences(of: #"^#+\s*"#, with: "",
+                                                   options: .regularExpression)
+                .trimmingCharacters(in: .whitespaces)
+        }
+        guard !current.isEmpty else { continue }
+
+        // 1. Split inline bullet symbols (•, ◦, ▪) even when no spaces surround them
+        let bulletParts = current.components(separatedBy: bulletChars)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        if bulletParts.count >= 2 {
+            let startsWithBullet = current.unicodeScalars.first.map { bulletChars.contains($0) } ?? false
+            for (index, part) in bulletParts.enumerated() {
+                if index == 0 && !startsWithBullet && (part.hasSuffix(":") || part.hasSuffix("：")) {
+                    paragraphs.append(part)
+                } else if index == 0 && !startsWithBullet && bulletParts.count == 2 && sourceBulletCount < 2 {
+                    paragraphs.append(part)
+                } else {
+                    paragraphs.append("• \(part)")
+                }
+            }
+            continue
+        }
+
+        // 2. Check for middle-dot (・ U+30FB or · U+00B7) collapsed clause lists
+        var splitByMiddleDot = false
+        for dot in ["・", "·"] where current.contains(dot) {
+            let parts = current.components(separatedBy: dot)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            // Foreign names (e.g. 莱昂纳多·达·芬奇) have short name segments without clause punctuation.
+            // List clauses have length >= 6 across all items and at least one longer or punctuated clause.
+            let isClauseList = parts.count >= 2 &&
+                parts.allSatisfy { $0.count >= 6 } &&
+                parts.contains {
+                    $0.count >= 10 || $0.contains("，") || $0.contains("。") ||
+                        $0.contains("；") || $0.contains("——")
+                }
+            if isClauseList {
+                for part in parts {
+                    if part.hasPrefix("•") || part.hasPrefix("-") {
+                        paragraphs.append(part)
+                    } else {
+                        paragraphs.append("• \(part)")
+                    }
+                }
+                splitByMiddleDot = true
+                break
+            }
+        }
+        if splitByMiddleDot { continue }
+
+        // Ensure consistent "• " spacing if the line starts with "•" without a space
+        if current.hasPrefix("•") && !current.hasPrefix("• ") {
+            let rest = current.dropFirst().trimmingCharacters(in: .whitespaces)
+            current = "• \(rest)"
+        }
+        paragraphs.append(current)
+    }
+
+    return paragraphs.joined(separator: "\n")
 }
 
 func oneMissingCharacter(_ complete: String, _ fragment: String) -> Bool {

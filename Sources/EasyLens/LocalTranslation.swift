@@ -72,10 +72,19 @@ struct SelectionTranslationTaskView: View {
             guard !source.isEmpty else { return }
             do {
                 let start = uptime()
-                let requests = [TranslationSession.Request(sourceText: source,
-                                                           clientIdentifier: "selection")]
+                let normalized = normalizeSourceSelectionParagraphs(source)
+                let paragraphs = normalized
+                    .components(separatedBy: "\n")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+                let items = paragraphs.isEmpty ? [source] : paragraphs
+                let requests = items.enumerated().map { index, paragraph in
+                    TranslationSession.Request(sourceText: paragraph,
+                                               clientIdentifier: "selection-\(index)")
+                }
                 let result = try await session.translations(from: requests)
-                bridge.onResult?(requestID, .success((result.first?.targetText ?? "", ms(start))))
+                let joined = result.map(\.targetText).joined(separator: "\n")
+                bridge.onResult?(requestID, .success((joined, ms(start))))
             } catch {
                 bridge.onResult?(requestID, .failure(error))
             }

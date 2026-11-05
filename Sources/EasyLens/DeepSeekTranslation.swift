@@ -28,9 +28,18 @@ struct DeepSeekTranslationClient {
 
     func translateSelection(_ text: String,
                             configuration: DeepSeekConfiguration) async throws -> String {
-        let instruction = "你是专业英译中译者。将用户提供的完整英文选区译为自然准确的简体中文，保留段落结构。只返回译文，不添加解释、标题、引号或 Markdown。"
-        return try await complete(system: instruction, user: text,
-                                  configuration: configuration)
+        let normalizedSource = normalizeSourceSelectionParagraphs(text)
+        let instruction = """
+你是专业英译中翻译器。将用户提供的英文选区准确翻译为简体中文。
+要求：
+1. 严格保留原文的段落结构、列表结构与换行：若原文包含多个段落、列表项或换行，译文必须在对应位置保留分段与换行，严禁将多段或列表内容合并堆叠为单一行或单一段落；
+2. 保持列表项标记（如原样保留项目符号 • 或数字编号），每个列表项单独成行；
+3. 只返回纯文本译文，不要添加任何解释、前缀、引号、Markdown 标题或代码块。
+"""
+        let rawResult = try await complete(system: instruction,
+                                           user: normalizedSource.isEmpty ? text : normalizedSource,
+                                           configuration: configuration)
+        return formatSelectionTranslation(rawResult, source: normalizedSource)
     }
 
     private func complete(system: String, user: String,

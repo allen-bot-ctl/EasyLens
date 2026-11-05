@@ -32,6 +32,7 @@ final class DeepSeekTranslationTests: XCTestCase {
             let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
             let messages = try XCTUnwrap(json["messages"] as? [[String: String]])
             XCTAssertEqual(messages[1]["content"], selected)
+            XCTAssertTrue(messages[0]["content"]?.contains("严格保留原文的段落结构") == true)
             return #"{"choices":[{"message":{"content":"第一行。\n第二行。"}}]}"#
         }
         let result = try await DeepSeekTranslationClient(session: session)

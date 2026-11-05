@@ -722,10 +722,15 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
         card.frame = CGRect(x: 0, y: 0, width: width, height: height)
         wordLabel.stringValue = title
         wordLabel.frame = CGRect(x: 16, y: 48, width: width - 32, height: 18)
-        contextLabel.font = .systemFont(ofSize: 15, weight: .medium)
-        contextLabel.textColor = NSColor(calibratedWhite: 0.88, alpha: 1)
-        contextLabel.stringValue = "正在转译"
         contextLabel.frame = CGRect(x: 16, y: 11, width: 94, height: 30)
+        let loadingStyle = NSMutableParagraphStyle()
+        loadingStyle.lineBreakMode = .byWordWrapping
+        loadingStyle.alignment = .natural
+        contextLabel.attributedStringValue = NSAttributedString(
+            string: "正在转译",
+            attributes: [.font: NSFont.systemFont(ofSize: 15, weight: .medium),
+                         .foregroundColor: NSColor(calibratedWhite: 0.88, alpha: 1),
+                         .paragraphStyle: loadingStyle])
         for index in 0..<3 {
             let dot = CALayer()
             dot.frame = CGRect(x: 114 + CGFloat(index) * 12, y: 24,
@@ -769,13 +774,16 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
             max(180, CGFloat(max(anchor.count + basis.count, chinese.count)) * 15 + 36))
         let contentWidth = width - 32
         let font = NSFont.systemFont(ofSize: 16, weight: .medium)
-        let measured = (chinese as NSString).boundingRect(
+        let focusStyle = NSMutableParagraphStyle()
+        focusStyle.lineBreakMode = .byWordWrapping
+        focusStyle.alignment = .natural
+        let attributed = NSAttributedString(
+            string: chinese,
+            attributes: [.font: font, .foregroundColor: NSColor.white, .paragraphStyle: focusStyle])
+        let measured = attributed.boundingRect(
             with: CGSize(width: contentWidth, height: 10000),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: font]).height
-        contextLabel.font = font
-        contextLabel.textColor = .white
-        contextLabel.stringValue = chinese
+            options: [.usesLineFragmentOrigin, .usesFontLeading]).height
+        contextLabel.attributedStringValue = attributed
         let cellHeight = contextLabel.cell?.cellSize(
             forBounds: CGRect(x: 0, y: 0, width: contentWidth, height: 10000)).height ?? 0
         let textHeight = min(screen.frame.height - 120,
@@ -796,31 +804,48 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
         translationPanel.orderFrontRegardless()
     }
 
+    private func selectionAttributedString(_ text: String, font: NSFont) -> NSAttributedString {
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byWordWrapping
+        style.alignment = .natural
+        style.lineSpacing = 3.5
+        style.paragraphSpacing = 9.0
+        return NSAttributedString(string: text, attributes: [
+            .font: font,
+            .foregroundColor: NSColor.white,
+            .paragraphStyle: style
+        ])
+    }
+
     private func showSelectionCard(_ chinese: String, pointer: CGPoint) {
         guard let screen = screen(at: pointer) else { return }
         finishRemoteLoading()
         showingSelectionCard = true
-        let width: CGFloat = min(420, max(250, screen.frame.width - 12))
-        let contentWidth = width - 32
+        let maxCardWidth: CGFloat = min(460, screen.frame.width - 24)
+        let minCardWidth: CGFloat = 260
         let font = NSFont.systemFont(ofSize: 15, weight: .medium)
-        let measured = (chinese as NSString).boundingRect(
+        let attributed = selectionAttributedString(chinese, font: font)
+        let initialBounds = attributed.boundingRect(
+            with: CGSize(width: maxCardWidth - 32, height: 10000),
+            options: [.usesLineFragmentOrigin, .usesFontLeading])
+        let width = min(maxCardWidth, max(minCardWidth, ceil(initialBounds.width) + 32))
+        let contentWidth = width - 32
+
+        let textBounds = attributed.boundingRect(
             with: CGSize(width: contentWidth, height: 10000),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: font]).height
-        contextLabel.font = font
-        contextLabel.textColor = .white
-        contextLabel.stringValue = chinese
+            options: [.usesLineFragmentOrigin, .usesFontLeading])
+        contextLabel.attributedStringValue = attributed
         let cellHeight = contextLabel.cell?.cellSize(
             forBounds: CGRect(x: 0, y: 0, width: contentWidth, height: 10000)).height ?? 0
         // NSTextField wraps Chinese text differently from NSString's estimate.
-        // Leave another line of room so the translated tail remains visible.
+        // Leave room so the translated tail remains clearly visible.
         let textHeight = min(screen.frame.height - 120,
-                             max(34, ceil(max(measured, cellHeight)) + 22))
-        let height = textHeight + 54
+                             max(34, ceil(max(textBounds.height, cellHeight)) + 18))
+        let height = textHeight + 52
         translationPanel.setContentSize(CGSize(width: width, height: height))
         translationPanel.contentView?.frame = CGRect(x: 0, y: 0, width: width, height: height)
         wordLabel.stringValue = "选区翻译"
-        wordLabel.frame = CGRect(x: 16, y: height - 34, width: contentWidth, height: 18)
+        wordLabel.frame = CGRect(x: 16, y: height - 32, width: contentWidth, height: 18)
         contextLabel.frame = CGRect(x: 16, y: 12, width: contentWidth, height: textHeight)
         let eyeFrame = panel.frame
         let x = max(screen.frame.minX + 6,
@@ -838,7 +863,7 @@ final class EasyLensAppDelegate: NSObject, NSApplicationDelegate {
         pendingSelectionText = nil
         switch result {
         case .success(let (chinese, elapsed)):
-            let translated = chinese.trimmingCharacters(in: .whitespacesAndNewlines)
+            let translated = formatSelectionTranslation(chinese, source: source)
             guard !translated.isEmpty else {
                 finishRemoteLoading()
                 endClipboardHint(reason: "empty-selection-translation")
