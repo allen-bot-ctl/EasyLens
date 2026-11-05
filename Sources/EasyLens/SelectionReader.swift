@@ -172,10 +172,15 @@ func selectedPointHit(_ element: AXUIElement, pointer: CGPoint,
     return selectedMarkerLinesHit(element, range: range, point: point)
 }
 
-private let inlineAXRoles: Set<String> = [
-    "AXStaticText", "AXListMarker", "AXLink", "AXButton", "AXImage",
-    "AXMenuButton", "AXPopUpButton", "AXCheckBox", "AXRadioButton",
-    "AXStyleGroup", "AXInline"
+private let explicitBlockAXRoles: Set<String> = [
+    "AXHeading", "AXList", "AXListItem", "AXTable", "AXRow", "AXCell",
+    "AXBlockQuote", "AXParagraph", "AXPre", "AXWebArea", "AXScrollArea",
+    "AXSplitGroup", "AXOutline"
+]
+
+private let nonTextControlAXRoles: Set<String> = [
+    "AXImage", "AXCheckBox", "AXRadioButton", "AXDisclosureTriangle",
+    "AXToolbar", "AXMenuBar", "AXMenu", "AXTabGroup"
 ]
 
 private final class StructuredSelectionCache: @unchecked Sendable {
@@ -197,73 +202,173 @@ private final class StructuredSelectionCache: @unchecked Sendable {
 
 private let structuredSelectionCache = StructuredSelectionCache()
 
+private func cleanSelectionFragment(_ text: String) -> String {
+    text.replacingOccurrences(of: "\u{FFFC}", with: "")
+        .replacingOccurrences(of: "\u{00A0}", with: " ")
+}
+
 func matchSelectionInBlocks(raw: String, blocks: [String]) -> String? {
-    let trimmedRaw = raw
-        .replacingOccurrences(of: "\u{FFFC}", with: "")
+    let trimmedRaw = cleanSelectionFragment(raw)
         .trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmedRaw.isEmpty, blocks.count > 1 else { return nil }
+    let cleanedBlocks = blocks
+        .map { cleanSelectionFragment($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+    guard !trimmedRaw.isEmpty, cleanedBlocks.count > 1 else { return nil }
+
+    // 1. Fast path: exact substring match against concatenated blocks.
     var concatenated = ""
     var ranges: [(range: NSRange, block: String)] = []
     var offset = 0
-    for block in blocks where !block.isEmpty {
-        let cleanedBlock = block.replacingOccurrences(of: "\u{FFFC}", with: "")
-        guard !cleanedBlock.isEmpty else { continue }
-        let len = (cleanedBlock as NSString).length
-        ranges.append((NSRange(location: offset, length: len), cleanedBlock))
-        concatenated += cleanedBlock
+    for block in cleanedBlocks {
+        let len = (block as NSString).length
+        ranges.append((NSRange(location: offset, length: len), block))
+        concatenated += block
         offset += len
     }
     let fullNS = concatenated as NSString
     let matchRange = fullNS.range(of: trimmedRaw)
-    guard matchRange.location != NSNotFound, matchRange.length > 0 else {
-        return nil
-    }
-    let matchStart = matchRange.location
-    let matchEnd = matchRange.location + matchRange.length
-    var selectedParagraphs: [String] = []
-    for (blockRange, block) in ranges {
-        let blockStart = blockRange.location
-        let blockEnd = blockRange.location + blockRange.length
-        guard blockEnd > matchStart && blockStart < matchEnd else { continue }
-        let sliceStart = max(0, matchStart - blockStart)
-        let sliceEnd = min(blockRange.length, matchEnd - blockStart)
-        guard sliceEnd > sliceStart else { continue }
-        let nsBlock = block as NSString
-        var slice = nsBlock.substring(with: NSRange(location: sliceStart, length: sliceEnd - sliceStart))
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if sliceStart > 0 && sliceStart <= 3 {
-            let prefix = nsBlock.substring(to: sliceStart).trimmingCharacters(in: .whitespaces)
-            if prefix == "•" || prefix == "◦" || prefix == "▪" {
-                slice = "\(prefix) \(slice)"
+    if matchRange.location != NSNotFound, matchRange.length > 0 {
+        let matchStart = matchRange.location
+        let matchEnd = matchRange.location + matchRange.length
+        var selectedParagraphs: [String] = []
+        for (blockRange, block) in ranges {
+            let blockStart = blockRange.location
+            let blockEnd = blockRange.location + blockRange.length
+            guard blockEnd > matchStart && blockStart < matchEnd else { continue }
+            let sliceStart = max(0, matchStart - blockStart)
+            let sliceEnd = min(blockRange.length, matchEnd - blockStart)
+            guard sliceEnd > sliceStart else { continue }
+            let nsBlock = block as NSString
+            var slice = nsBlock.substring(with: NSRange(location: sliceStart, length: sliceEnd - sliceStart))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if sliceStart > 0 && sliceStart <= 3 {
+                let prefix = nsBlock.substring(to: sliceStart).trimmingCharacters(in: .whitespaces)
+                if prefix == "•" || prefix == "◦" || prefix == "▪" {
+                    slice = "\(prefix) \(slice)"
+                }
+            }
+            if !slice.isEmpty {
+                selectedParagraphs.append(slice)
             }
         }
-        if !slice.isEmpty {
-            selectedParagraphs.append(slice)
+        if selectedParagraphs.count > 1 {
+            return selectedParagraphs.joined(separator: "\n")
         }
     }
-    guard selectedParagraphs.count > 1 else { return nil }
-    return selectedParagraphs.joined(separator: "\n")
+
+    // 2. Boundary-junction projection: even if a block contains an inline button/icon
+    // (like "(?)") or slight whitespace differences in the middle, the boundary between
+    // block[i] (its trailing suffix) and block[i+1] (its leading prefix) can be located
+    // directly inside trimmedRaw to restore paragraph breaks accurately.
+    let rawNS = trimmedRaw as NSString
+    var splitOffsets: [(splitAt: Int, insertBullet: String?)] = []
+    var searchStart = 0
+
+    func stripLeadingBullet(_ text: String) -> (bullet: String?, body: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        for marker in ["•", "◦", "▪"] where trimmed.hasPrefix(marker) {
+            let rest = String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
+            return (marker, rest)
+        }
+        return (nil, trimmed)
+    }
+
+    for i in 0..<(cleanedBlocks.count - 1) {
+        let leftBlock = cleanedBlocks[i]
+        let rightBlock = cleanedBlocks[i + 1]
+        let leftNS = leftBlock as NSString
+        let (rightBullet, rightBody) = stripLeadingBullet(rightBlock)
+        let rightBodyNS = rightBody as NSString
+        guard leftNS.length >= 4, rightBodyNS.length >= 4,
+              searchStart < rawNS.length else { continue }
+
+        var matchedSplit: (splitAt: Int, insertBullet: String?)?
+        for suffixLen in [min(28, leftNS.length), min(16, leftNS.length), min(8, leftNS.length)] where suffixLen >= 4 {
+            let suffix = leftNS.substring(from: leftNS.length - suffixLen)
+                .trimmingCharacters(in: .whitespaces)
+            guard suffix.count >= 4 else { continue }
+            for prefixLen in [min(28, rightBodyNS.length), min(16, rightBodyNS.length), min(8, rightBodyNS.length)] where prefixLen >= 4 {
+                let prefix = rightBodyNS.substring(to: prefixLen)
+                    .trimmingCharacters(in: .whitespaces)
+                guard prefix.count >= 4 else { continue }
+                let escapedSuffix = NSRegularExpression.escapedPattern(for: suffix)
+                let escapedPrefix = NSRegularExpression.escapedPattern(for: prefix)
+                let pattern = "\(escapedSuffix)\\s*([•◦▪]\\s*)?\(escapedPrefix)"
+                guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+                let searchRange = NSRange(location: searchStart, length: rawNS.length - searchStart)
+                if let match = regex.firstMatch(in: trimmedRaw, range: searchRange) {
+                    let suffixEnd = match.range.location + (suffix as NSString).length
+                    let hasInlineBullet = match.range(at: 1).location != NSNotFound && match.range(at: 1).length > 0
+                    let bulletToInsert = (!hasInlineBullet && rightBullet != nil) ? rightBullet : nil
+                    matchedSplit = (suffixEnd, bulletToInsert)
+                    break
+                }
+            }
+            if matchedSplit != nil { break }
+        }
+
+        if let matchedSplit, matchedSplit.splitAt > searchStart, matchedSplit.splitAt < rawNS.length {
+            splitOffsets.append(matchedSplit)
+            searchStart = matchedSplit.splitAt
+        }
+    }
+
+    guard !splitOffsets.isEmpty else { return nil }
+    var paragraphs: [String] = []
+    var cursor = 0
+    for ( index, split) in splitOffsets.enumerated() {
+        guard split.splitAt > cursor else { continue }
+        var segment = rawNS.substring(with: NSRange(location: cursor, length: split.splitAt - cursor))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if index > 0, let prevBullet = splitOffsets[index - 1].insertBullet,
+           !segment.hasPrefix("•") && !segment.hasPrefix("◦") && !segment.hasPrefix("▪") {
+            segment = "\(prevBullet) \(segment)"
+        }
+        if !segment.isEmpty {
+            paragraphs.append(segment)
+        }
+        cursor = split.splitAt
+    }
+    if cursor < rawNS.length {
+        var tail = rawNS.substring(from: cursor).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let lastBullet = splitOffsets.last?.insertBullet,
+           !tail.hasPrefix("•") && !tail.hasPrefix("◦") && !tail.hasPrefix("▪") {
+            tail = "\(lastBullet) \(tail)"
+        }
+        if !tail.isEmpty {
+            paragraphs.append(tail)
+        }
+    }
+    guard paragraphs.count > 1 else { return nil }
+    return paragraphs.joined(separator: "\n")
 }
 
-private func collectAXBlocks(from container: AXUIElement, maxNodes: Int = 500) -> [String] {
+private func collectAXBlocks(from container: AXUIElement,
+                             pivotChain: [AXUIElement] = [],
+                             maxNodes: Int = 2500) -> [String] {
     var blocks: [String] = []
     var currentBlock = ""
     var visited = 0
 
     func flushBlock() {
-        if !currentBlock.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            blocks.append(currentBlock)
+        let trimmed = currentBlock.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            blocks.append(trimmed)
         }
         currentBlock = ""
     }
 
-    func walk(_ node: AXUIElement, depth: Int) {
-        guard depth <= 12, visited < maxNodes else { return }
+    func roleOf(_ element: AXUIElement) -> String {
+        var roleRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
+        return (roleRef as? String) ?? ""
+    }
+
+    func walk(_ node: AXUIElement, depth: Int, inParagraph: Bool) {
+        guard depth <= 18, visited < maxNodes else { return }
         visited += 1
         AXUIElementSetMessagingTimeout(node, 0.1)
-        var roleRef: CFTypeRef?
-        AXUIElementCopyAttributeValue(node, kAXRoleAttribute as CFString, &roleRef)
-        let role = (roleRef as? String) ?? ""
+        let role = roleOf(node)
 
         if role == "AXStaticText" || role == "AXListMarker" {
             var valueRef: CFTypeRef?
@@ -274,53 +379,93 @@ private func collectAXBlocks(from container: AXUIElement, maxNodes: Int = 500) -
             return
         }
 
-        let isInline = inlineAXRoles.contains(role)
-        if !isInline {
-            flushBlock()
+        if nonTextControlAXRoles.contains(role) {
+            return
         }
 
         var childrenRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(node, kAXChildrenAttribute as CFString, &childrenRef) == .success,
-           let children = childrenRef as? [AXUIElement], !children.isEmpty {
+        let hasChildren = AXUIElementCopyAttributeValue(
+            node, kAXChildrenAttribute as CFString, &childrenRef) == .success
+        let children = (hasChildren ? (childrenRef as? [AXUIElement]) : nil) ?? []
+
+        // A container that directly holds AXStaticText or AXListMarker children
+        // represents a single paragraph/heading/list-item flow; inline AXGroup
+        // wrappers (e.g. <span>) inside it must not split the paragraph.
+        let hasDirectTextChild = children.contains { child in
+            let r = roleOf(child)
+            return r == "AXStaticText" || r == "AXListMarker"
+        }
+        let isExplicitBlock = explicitBlockAXRoles.contains(role)
+        let flushesBlock = isExplicitBlock || (!inParagraph && !hasDirectTextChild) ||
+            (!inParagraph && hasDirectTextChild)
+
+        if flushesBlock {
+            flushBlock()
+        }
+
+        if !children.isEmpty {
             let slice: ArraySlice<AXUIElement>
-            if children.count > 30 {
-                if let selIdx = children.firstIndex(where: { child in
+            if children.count > 35 {
+                if let pivotIdx = children.firstIndex(where: { child in
+                    pivotChain.contains { CFEqual(child, $0) }
+                }) {
+                    let low = max(0, pivotIdx - 25)
+                    let high = min(children.count, pivotIdx + 35)
+                    slice = children[low..<high]
+                } else if let selIdx = children.firstIndex(where: { child in
                     var selVal: CFTypeRef?
                     return AXUIElementCopyAttributeValue(child, kAXSelectedTextAttribute as CFString, &selVal) == .success &&
                         (selVal as? String)?.isEmpty == false
                 }) {
-                    let low = max(0, selIdx - 15)
-                    let high = min(children.count, selIdx + 25)
+                    let low = max(0, selIdx - 20)
+                    let high = min(children.count, selIdx + 30)
                     slice = children[low..<high]
                 } else {
-                    slice = children.prefix(40)
+                    slice = children[...]
                 }
             } else {
                 slice = children[...]
             }
+            let nextInParagraph = inParagraph || hasDirectTextChild
             for child in slice {
-                walk(child, depth: depth + 1)
+                walk(child, depth: depth + 1, inParagraph: nextInParagraph)
             }
         }
 
-        if !isInline {
+        if flushesBlock {
             flushBlock()
         }
     }
 
-    walk(container, depth: 0)
+    walk(container, depth: 0, inParagraph: false)
     flushBlock()
     return blocks
 }
 
-private func structuredSelectionText(from element: AXUIElement, raw: String) -> String {
+private func structuredSelectionText(from element: AXUIElement,
+                                     hitChain: [AXUIElement] = [],
+                                     raw: String) -> String {
     guard !raw.contains("\n") else { return raw }
     if let cached = structuredSelectionCache.get(for: raw) {
         return cached
     }
 
-    // Build candidate containers from deepest selected descendant up to ancestors.
-    var chain: [AXUIElement] = [element]
+    // Build candidate containers starting from the local containers enclosing
+    // the hit leaf element up to broader document containers.
+    var candidates: [AXUIElement] = []
+    func appendUnique(_ candidate: AXUIElement) {
+        if !candidates.contains(where: { CFEqual($0, candidate) }) {
+            candidates.append(candidate)
+        }
+    }
+
+    // If we have a bottom-up chain from the pointer hit leaf, skip the leaf
+    // itself and start from its immediate parent/section containers.
+    for node in hitChain.dropFirst() {
+        appendUnique(node)
+    }
+
+    var downChain: [AXUIElement] = [element]
     var current = element
     for _ in 0..<6 {
         var childrenRef: CFTypeRef?
@@ -331,43 +476,45 @@ private func structuredSelectionText(from element: AXUIElement, raw: String) -> 
                   return AXUIElementCopyAttributeValue(child, kAXSelectedTextAttribute as CFString, &selVal) == .success &&
                       (selVal as? String) == raw
               }) else { break }
-        chain.append(selectedChild)
+        downChain.append(selectedChild)
         current = selectedChild
     }
+    for node in downChain.reversed() {
+        appendUnique(node)
+    }
 
-    var ancestors: [AXUIElement] = []
     var parentCursor = element
-    for _ in 0..<6 {
+    for _ in 0..<8 {
         var parentRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(parentCursor, kAXParentAttribute as CFString, &parentRef) == .success,
               let parentRef else { break }
         let parent = parentRef as! AXUIElement
-        ancestors.append(parent)
+        appendUnique(parent)
         parentCursor = parent
     }
 
-    // Search from more specific containers up to broader document containers.
-    let candidates = Array(chain.reversed()) + ancestors
+    let pivotChain = hitChain + candidates
     for candidate in candidates {
         var roleRef: CFTypeRef?
         AXUIElementCopyAttributeValue(candidate, kAXRoleAttribute as CFString, &roleRef)
         let role = (roleRef as? String) ?? ""
-        if role == "AXStaticText" || role == "AXLink" || role == "AXListMarker" {
+        if role == "AXStaticText" || role == "AXLink" || role == "AXListMarker" ||
+           role == "AXApplication" || role == "AXWindow" {
             continue
         }
-        let blocks = collectAXBlocks(from: candidate)
+        let blocks = collectAXBlocks(from: candidate, pivotChain: pivotChain)
         if let matched = matchSelectionInBlocks(raw: raw, blocks: blocks) {
             structuredSelectionCache.set(raw: raw, structured: matched)
             return matched
         }
     }
 
-    structuredSelectionCache.set(raw: raw, structured: raw)
     return raw
 }
 
 func selectionOnElement(_ element: AXUIElement,
-                                pointer: CGPoint?) -> (LiveSelection, Int)? {
+                        pointer: CGPoint?,
+                        hitChain: [AXUIElement] = []) -> (LiveSelection, Int)? {
     AXUIElementSetMessagingTimeout(element, 0.2)
     var value: CFTypeRef?
     let selectionError = AXUIElementCopyAttributeValue(
@@ -415,8 +562,8 @@ func selectionOnElement(_ element: AXUIElement,
           !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         return nil
     }
-    let structured = structuredSelectionText(from: element, raw: raw)
-    let text = eligibleEnglishText(structured, maxLength: 1200)
+    let structured = structuredSelectionText(from: element, hitChain: hitChain, raw: raw)
+    let text = eligibleEnglishText(structured, maxLength: 4000)
     let geometry = pointer.map {
         selectedPointHit(element, pointer: $0, markerRange: markerRange)
     } ?? .unavailable
@@ -454,10 +601,24 @@ func readLiveSelection(at pointer: CGPoint? = nil,
     let point = axPoint(pointer)
     var best: (LiveSelection, Int)?
     var visualCandidate: (LiveSelection, Int)?
+    var deepestHitChain: [AXUIElement] = []
     func inspectAncestors(_ start: AXUIElement) {
-        var element = start
-        for _ in 0..<14 {
-            if let candidate = selectionOnElement(element, pointer: pointer) {
+        var chain: [AXUIElement] = []
+        var cursor: AXUIElement? = start
+        for _ in 0..<28 {
+            guard let node = cursor else { break }
+            chain.append(node)
+            var parent: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(node, kAXParentAttribute as CFString,
+                                                &parent) == .success,
+                  let parent else { break }
+            cursor = (parent as! AXUIElement)
+        }
+        if chain.count > deepestHitChain.count {
+            deepestHitChain = chain
+        }
+        for element in chain {
+            if let candidate = selectionOnElement(element, pointer: pointer, hitChain: chain) {
                 if candidate.0.pointHit, candidate.1 > (best?.1 ?? -1) {
                     best = candidate
                 } else if !candidate.0.pointHit, candidate.0.text != nil,
@@ -465,11 +626,6 @@ func readLiveSelection(at pointer: CGPoint? = nil,
                     visualCandidate = candidate
                 }
             }
-            var parent: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString,
-                                                &parent) == .success,
-                  let parent else { break }
-            element = parent as! AXUIElement
         }
     }
     var hit: AXUIElement?
@@ -491,14 +647,28 @@ func readLiveSelection(at pointer: CGPoint? = nil,
             }
         }
     }
-    if let best { return best.0 }
     if let focused,
-       let fallback = selectionOnElement(focused as! AXUIElement, pointer: pointer) {
-        if fallback.0.pointHit { return fallback.0 }
-        if fallback.0.text != nil,
-           fallback.1 > (visualCandidate?.1 ?? -1) {
+       let fallback = selectionOnElement(focused as! AXUIElement,
+                                         pointer: pointer,
+                                         hitChain: deepestHitChain) {
+        if fallback.0.pointHit, fallback.1 > (best?.1 ?? -1) {
+            best = fallback
+        } else if !fallback.0.pointHit, fallback.0.text != nil,
+                  fallback.1 > (visualCandidate?.1 ?? -1) {
             visualCandidate = fallback
         }
+    }
+    if let best {
+        // A child node under the pointer may confirm geometric hit for its own
+        // paragraph while an ancestor (e.g. AXWebArea) holds the complete
+        // multi-paragraph selection text. Preserve both the hit and full text.
+        if let visualCandidate, visualCandidate.1 > best.1,
+           let fullText = visualCandidate.0.text {
+            return LiveSelection(text: fullText, state: best.0.state,
+                                 pointHit: true,
+                                 geometryAvailable: best.0.geometryAvailable)
+        }
+        return best.0
     }
     // Geometry from embedded web views can report a miss even while the
     // selection is visibly under the pointer. Keep the text as a candidate;

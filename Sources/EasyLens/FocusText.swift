@@ -343,9 +343,83 @@ func englishDominant(_ text: String) -> Bool {
     return han == 0 ? latin > 0 : latin >= max(12, han * 3)
 }
 
+private let punctuatedBlockSeamRegex = try! NSRegularExpression(
+    pattern: "([a-z]{2,}[.?!][”\"'\\)]?)(?=[A-Z][a-z]{1,}|[A-Z]\\s)")
+
+private let gluedBlockWordSeamRegex = try! NSRegularExpression(
+    pattern: "\\b([A-Za-z][a-z]{1,22})([A-Z][a-z]{1,22})\\b(?=\\s+[A-Za-z])")
+
+private let knownMixedCaseWords: Set<String> = [
+    "iphone", "ipad", "ipod", "imac", "icloud", "ios", "macos", "watchos",
+    "tvos", "visionos", "ebay", "email", "ecommerce", "youtube", "deepseek",
+    "openai", "chatgpt", "github", "gitlab", "javascript", "typescript",
+    "wordpress", "linkedin", "playstation", "mastercard", "paypal", "tiktok",
+    "wechat", "whatsapp", "powerpoint", "onedrive", "garageband", "facetime",
+    "macbook", "airpods", "easylens", "screencapturekit", "appkit", "swiftui",
+    "webkit"
+]
+
+private let paragraphStarterWords: Set<String> = [
+    "we", "you", "they", "he", "she", "it", "the", "this", "these", "that",
+    "those", "in", "on", "at", "for", "to", "from", "with", "by", "as", "if",
+    "when", "while", "before", "after", "besides", "however", "therefore",
+    "please", "our", "your", "their", "here", "there", "what", "why", "how",
+    "where", "who", "understanding", "although", "because", "since", "unless",
+    "until", "whether"
+]
+
+private func splitGluedBlockSeams(in line: String) -> [String] {
+    let range = NSRange(location: 0, length: (line as NSString).length)
+    let afterPunctuation = punctuatedBlockSeamRegex.stringByReplacingMatches(
+        in: line, range: range, withTemplate: "$1\n")
+
+    var outputLines: [String] = []
+    for segment in afterPunctuation.components(separatedBy: "\n") {
+        let nsSegment = segment as NSString
+        let matches = gluedBlockWordSeamRegex.matches(
+            in: segment, range: NSRange(location: 0, length: nsSegment.length))
+        guard !matches.isEmpty else {
+            outputLines.append(segment)
+            continue
+        }
+        var rebuilt = ""
+        var cursor = 0
+        for match in matches {
+            let fullToken = nsSegment.substring(with: match.range)
+            let left = nsSegment.substring(with: match.range(at: 1))
+            let right = nsSegment.substring(with: match.range(at: 2))
+            let lowerFull = fullToken.lowercased()
+            let shouldSplit: Bool
+            if knownMixedCaseWords.contains(lowerFull) ||
+               lowerFull.hasPrefix("mc") || lowerFull.hasPrefix("mac") ||
+               lowerFull.hasPrefix("fitz") {
+                shouldSplit = false
+            } else if left.first?.isLowercase == true {
+                let leftValid = validatedEnglishWord(left)?.caseInsensitiveCompare(left) == .orderedSame
+                let rightValid = validatedEnglishWord(right)?.caseInsensitiveCompare(right) == .orderedSame ||
+                    paragraphStarterWords.contains(right.lowercased())
+                shouldSplit = leftValid && rightValid
+            } else {
+                let leftValid = validatedEnglishWord(left) != nil
+                shouldSplit = leftValid && paragraphStarterWords.contains(right.lowercased())
+            }
+            if shouldSplit {
+                let splitPoint = match.range(at: 1).location + match.range(at: 1).length
+                rebuilt += nsSegment.substring(with: NSRange(location: cursor, length: splitPoint - cursor))
+                rebuilt += "\n"
+                cursor = splitPoint
+            }
+        }
+        rebuilt += nsSegment.substring(from: cursor)
+        outputLines.append(contentsOf: rebuilt.components(separatedBy: "\n"))
+    }
+    return outputLines
+}
+
 func normalizeSourceSelectionParagraphs(_ raw: String) -> String {
     let cleaned = raw
         .replacingOccurrences(of: "\u{FFFC}", with: "")
+        .replacingOccurrences(of: "\u{00A0}", with: " ")
         .replacingOccurrences(of: "\r\n", with: "\n")
         .replacingOccurrences(of: "\r", with: "\n")
         .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -354,23 +428,27 @@ func normalizeSourceSelectionParagraphs(_ raw: String) -> String {
     let bulletChars = CharacterSet(charactersIn: "•◦▪")
     var paragraphs: [String] = []
     for rawLine in cleaned.components(separatedBy: "\n") {
-        let line = rawLine.trimmingCharacters(in: .whitespaces)
-        guard !line.isEmpty else { continue }
-        // Split inline bullet markers (e.g. "...services• What we expect...")
-        let parts = line.components(separatedBy: bulletChars)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-        if parts.count >= 2, line.unicodeScalars.contains(where: { bulletChars.contains($0) }) {
-            let startsWithBullet = line.unicodeScalars.first.map { bulletChars.contains($0) } ?? false
-            for (index, part) in parts.enumerated() {
-                if index == 0 && !startsWithBullet && part.hasSuffix(":") {
-                    paragraphs.append(part)
-                } else {
-                    paragraphs.append("• \(part)")
+        for seamSplitLine in splitGluedBlockSeams(in: rawLine) {
+            let line = seamSplitLine.trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty else { continue }
+            // Split inline bullet markers (e.g. "...services• What we expect...")
+            let parts = line.components(separatedBy: bulletChars)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            if parts.count >= 2, line.unicodeScalars.contains(where: { bulletChars.contains($0) }) {
+                let startsWithBullet = line.unicodeScalars.first.map { bulletChars.contains($0) } ?? false
+                let restHavePeriods = parts.dropFirst().allSatisfy { $0.hasSuffix(".") }
+                for (index, part) in parts.enumerated() {
+                    if index == 0 && !startsWithBullet &&
+                       (part.hasSuffix(":") || (part.hasSuffix(".") && !restHavePeriods)) {
+                        paragraphs.append(part)
+                    } else {
+                        paragraphs.append("• \(part)")
+                    }
                 }
+            } else {
+                paragraphs.append(line)
             }
-        } else {
-            paragraphs.append(line)
         }
     }
     return paragraphs.joined(separator: "\n")
@@ -379,17 +457,31 @@ func normalizeSourceSelectionParagraphs(_ raw: String) -> String {
 func eligibleEnglishText(_ raw: String, maxLength: Int) -> String? {
     let text = normalizeSourceSelectionParagraphs(raw)
     guard (2...maxLength).contains(text.count),
-          text.range(of: "[A-Za-z]", options: .regularExpression) != nil,
-          !looksLikePathOrCode(text), !text.contains("{") && !text.contains("}") else {
+          text.range(of: "[A-Za-z]", options: .regularExpression) != nil else {
         return nil
+    }
+    let words = clipboardWords(text)
+    if words.count < 4 {
+        guard !looksLikePathOrCode(text),
+              !text.contains("{") && !text.contains("}") else {
+            return nil
+        }
+    } else {
+        let lines = text.components(separatedBy: "\n").filter { !$0.isEmpty }
+        let codeOrPathLines = lines.filter {
+            looksLikePathOrCode($0) || $0.contains("{") || $0.contains("}")
+        }
+        if codeOrPathLines.count == lines.count, words.count < 8 {
+            return nil
+        }
     }
     if text.unicodeScalars.contains(where: { (0x3400...0x9FFF).contains($0.value) }) {
         // English prose may quote Chinese examples. Keep its full selection,
         // while a Chinese passage with a stray Latin abbreviation stays out.
-        guard clipboardWords(text).count >= 3,
+        guard words.count >= 3,
               englishDominant(text) else { return nil }
     }
-    if clipboardWords(text).count >= 3 {
+    if words.count >= 3 {
         let recognizer = NLLanguageRecognizer()
         recognizer.processString(text)
         if (recognizer.languageHypotheses(withMaximum: 3)[.english] ?? 0) < 0.35 {
@@ -552,7 +644,7 @@ func selectedTextAtFocus(_ hint: String, anchor: String,
                                  minimumVerifiedWords: Int = 2,
                                  minimumVerifiedLetters: Int = 0,
                                  windowRadius: Int = 2) -> String? {
-    guard hint.count <= 1200 else { return nil }
+    guard hint.count <= 4000 else { return nil }
     let selected = clipboardWords(hint).map(foldedLetters)
     let visible = clipboardWords(focusLine).map(foldedLetters)
     guard selected.count > 1, visible.indices.contains(focusWordIndex),
@@ -636,6 +728,15 @@ func selectionHighlightAtCenter(_ image: CGImage, focus: CGPoint,
     let height = bitmap.pixelsHigh
     let x = Int(focus.x * CGFloat(width))
     let y = Int((1 - focus.y) * CGFloat(height))
+    func colorDistance(_ a: Int, _ b: Int) -> Int {
+        abs(((a >> 16) & 255) - ((b >> 16) & 255)) +
+        abs(((a >> 8) & 255) - ((b >> 8) & 255)) +
+        abs((a & 255) - (b & 255))
+    }
+    func chroma(_ color: Int) -> Int {
+        let channels = [(color >> 16) & 255, (color >> 8) & 255, color & 255]
+        return (channels.max() ?? 0) - (channels.min() ?? 0)
+    }
     func dominant(_ x: Int, _ y: Int, radius: Int = 6) -> (Int, Int)? {
         guard x >= radius, y >= radius,
               x + radius < width, y + radius < height else { return nil }
@@ -654,27 +755,55 @@ func selectionHighlightAtCenter(_ image: CGImage, focus: CGPoint,
         return counts.max(by: { $0.value < $1.value })
             .map { ($0.key, $0.value) }
     }
-    guard let center = dominant(x, y), center.1 >= 30 else { return false }
+    let rowTop = max(0, Int((1 - row.maxY) * CGFloat(height)))
+    let rowBottom = min(height - 1, Int((1 - row.minY) * CGFloat(height)))
+    func tintedRowFill(_ cx: Int, _ cy: Int, radius: Int = 9) -> (Int, Int)? {
+        let minX = max(0, cx - radius)
+        let maxX = min(width - 1, cx + radius)
+        let minY = max(rowTop, cy - radius)
+        let maxY = min(rowBottom, cy + radius)
+        guard minX <= maxX, minY <= maxY else { return nil }
+        var counts: [Int: Int] = [:]
+        for yy in minY...maxY {
+            for xx in minX...maxX {
+                guard let color = bitmap.colorAt(x: xx, y: yy)?
+                    .usingColorSpace(.deviceRGB) else { continue }
+                let r = Int(color.redComponent * 255 / 16) * 16
+                let g = Int(color.greenComponent * 255 / 16) * 16
+                let b = Int(color.blueComponent * 255 / 16) * 16
+                let key = (r << 16) | (g << 8) | b
+                if chroma(key) >= 24 {
+                    counts[key, default: 0] += 1
+                }
+            }
+        }
+        return counts.max(by: { $0.value < $1.value })
+            .map { ($0.key, $0.value) }
+    }
+    let centerColor: Int
+    if let primary = dominant(x, y), primary.1 >= 25, chroma(primary.0) >= 25 {
+        centerColor = primary.0
+    } else if let tinted = tintedRowFill(x, y), tinted.1 >= 20, chroma(tinted.0) >= 24 {
+        centerColor = tinted.0
+    } else {
+        return false
+    }
     let left = Int(row.minX * CGFloat(width)) - 14
     let right = Int(row.maxX * CGFloat(width)) + 14
     let above = Int((1 - row.maxY) * CGFloat(height)) - 14
     let below = Int((1 - row.minY) * CGFloat(height)) + 14
-    let references = [dominant(left, y), dominant(right, y),
-                      dominant(x, above), dominant(x, below)].compactMap { $0 }
-    func colorDistance(_ a: Int, _ b: Int) -> Int {
-        abs(((a >> 16) & 255) - ((b >> 16) & 255)) +
-        abs(((a >> 8) & 255) - ((b >> 8) & 255)) +
-        abs((a & 255) - (b & 255))
-    }
-    func chroma(_ color: Int) -> Int {
-        let channels = [(color >> 16) & 255, (color >> 8) & 255, color & 255]
-        return (channels.max() ?? 0) - (channels.min() ?? 0)
-    }
+    let references = [
+        dominant(left, y), dominant(right, y),
+        dominant(x, above), dominant(x, below),
+        dominant(left - 36, y), dominant(right + 36, y),
+        dominant(x, above - 48), dominant(x, below + 48),
+        dominant(12, y), dominant(width - 13, y)
+    ].compactMap { $0 }
     // A dark unselected row can differ greatly from the blue selection on
     // the row beside it. The center itself must carry the tinted fill.
-    return chroma(center.0) >= 25 && references.contains {
-        colorDistance(center.0, $0.0) >= 80 &&
-            chroma(center.0) - chroma($0.0) >= 15
+    return chroma(centerColor) >= 24 && references.contains {
+        colorDistance(centerColor, $0.0) >= 75 &&
+            chroma(centerColor) - chroma($0.0) >= 15
     }
 }
 

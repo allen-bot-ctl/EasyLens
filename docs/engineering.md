@@ -18,7 +18,7 @@
 | `EasyLensAppDelegate.swift` | 菜单栏、快捷键、屏幕捕获、异步调度与结果展示。 |
 | `EasyLensMain.swift`、`DiagnosticTranslation.swift` | 应用入口与 Debug 诊断命令。 |
 
-`Package.swift` 构建可执行文件，`scripts/build-app.sh` 将其与 `Resources/Info.plist` 组装成 `build/EasyLens.app`，然后对整包签名与校验。Bundle ID 为 `ai.nangua.EasyLens`。本机首次运行 `scripts/setup-local-signing.sh` 会在登录钥匙串创建仅供开发的固定签名身份；此后构建脚本自动使用它，也支持通过 `EASYLENS_CODESIGN_IDENTITY` 显式指定其他身份。未设置时回退到临时签名并给出警告。固定签名让源码更新后的代码身份保持稳定，避免辅助功能等系统授权因代码哈希变化而失效。`LSUIElement=true` 加上 AppKit accessory 激活策略，使应用只在菜单栏驻留，不显示 Dock 图标。
+`Package.swift` 构建可执行文件，`scripts/build-app.sh` 将其与 `Resources/Info.plist` 组装成 `build/EasyLens.app`，然后对整包签名与校验。Bundle ID 为 `ai.nangua.EasyLens`。本机首次运行 `scripts/setup-local-signing.sh` 会在登录钥匙串创建仅供开发的固定签名身份；此后构建脚本自动使用它，也支持通过 `EASYLENS_CODESIGN_IDENTITY` 显式指定其他身份。未设置时回退到临时签名并给出警告。固定签名让源码更新后的代码身份保持稳定，避免辅助功能等系统授权因代码哈希变化而失效。`LSUIElement=true` 加上 AppKit accessory 激活策略，使应用只在菜单栏驻留，不显示 Dock 图标；进程启动时通过 `EasyLens.lock` 保持单实例运行，重新构建 `.app` 后需退出旧菜单栏进程再启动新构建。
 
 ## 首次使用与权限
 
@@ -42,7 +42,7 @@ EASYLENS_BUILD_CONFIGURATION=release sh scripts/build-app.sh
 
 在 VS Code 打开的 Markdown 中，Vision 快速 OCR 曾把中文误读出 `/`，旧规则因此跳过整行，使同一行的英文词也无法定位；偶发单帧识别失败还会立即收起翻译卡。现仅遮蔽识别到的路径/文件名片段，保留相邻词，并在静止焦点下容忍一次空帧。已用该 README 的编辑器截图验证 `Renderer`、`lock` 可定位而路径本身不被选为词；固定焦点的运行检查连续命中并维持翻译卡。不同主题、字号与选区的表现仍需继续实测。
 
-在 Chromium 内核浏览器（如 Tabbit、Chrome）中跨多个列表项或段落划选时，`kAXSelectedTextAttribute` 与 `AXStringForTextMarkerRange` 会直接拼接各块级节点的文字而不插入换行符（如 `services• What`、`terms.Besides`）；同时远端模型在“不添加 Markdown”指令下可能将列表项用无空格的间隔号（`·`、`•`、`・`）压成单段。现由 `SelectionReader` 在无换行选区下沿辅助功能树（`AXList`、`AXGroup`、`AXHeading` 等）还原块级段落边界并缓存映射，对源文本与译文中的行内项目符号及无空格间隔号分隔的长子句列表做分段规范化（保留外文人名中的间隔号），本地 Translation 按段发起批量请求，DeepSeek 提示词显式要求保留段落与列表换行，选区卡片通过 `NSAttributedString` 配置行距与段距展示。已用 Tabbit 实时多段列表选区与单元测试验证；深层嵌套 DOM、复杂表格及其他第三方应用的辅助功能树表现仍需继续实测。
+在 Chromium 内核浏览器（如 Tabbit、Chrome）中跨多个标题、段落或列表项划选时，`kAXSelectedTextAttribute` 与 `AXStringForTextMarkerRange` 会直接拼接各块级节点的文字而不插入换行符（如 `termsWe know`、`you.These`、`services• What`），且在仅根节点 `AXWebArea` 暴露完整选区、段落内含行内按钮/控件（如 `services (?)`）时，从页面顶部遍历与全串字面匹配会漏失块边界；本地 Translation 不同于云端大模型，拿到未分段字符串时会将标题与正文合译为单段。现由 `SelectionReader` 保留从鼠标命中叶子节点向上的完整祖先链，合成子节点几何命中与上层节点的完整选区，围绕命中节点做局部块遍历与相邻块尾首接缝投影（Boundary-Junction Projection），配合 `FocusText` 对无空格块接缝（标题与正文、句末标点与下段首词、行内项目符号及无空格间隔号列表，保留 `GitHub` 等大小写专有名词与外文人名间隔号）做正字法分段兜底；本地 Translation 按段发起批量请求，DeepSeek 提示词显式保留段落换行，选区卡片通过 `NSAttributedString` 配置行距与段距；同时将多段散文选区上限扩至 4000 字符、在密集 OCR 下围绕焦点词裁剪窗口，并在视觉高亮核对中结合外缘背景参照与当前行有色填充判定。已通过 Tabbit 实时框选、截图样本及单元测试验证；复杂表格、Canvas 及其他第三方应用的辅助功能树表现仍需继续实测。
 
 当前仍是本地开发工程。本地自签名证书只用于保持开发机上的代码身份，不能用于正式分发或公证。从旧的临时签名切换后，已有的授权记录可能对应旧代码身份；可分别运行 `tccutil reset Accessibility ai.nangua.EasyLens` 与 `tccutil reset ScreenCapture ai.nangua.EasyLens` 清除旧记录，再用新构建授权一次。分发前需要正式签名与公证、安装与升级机制，以及在不同 macOS 版本和目标应用上的权限与选区回归测试。
 

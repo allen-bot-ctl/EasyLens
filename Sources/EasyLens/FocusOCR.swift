@@ -368,6 +368,32 @@ func passageAtCenter(_ image: CGImage, focus: CGPoint,
                                                  length: (sentence as NSString).length))
         }
     }
+    if (words.count > 60 || sentence.count > 320),
+       let focusIndex = words.firstIndex(where: {
+           $0.range.location <= offset && offset < NSMaxRange($0.range)
+       }) {
+        let source = sentence as NSString
+        var first = max(0, focusIndex - 20)
+        var last = min(words.count - 1, focusIndex + 20)
+        while first < last &&
+              (NSMaxRange(words[last].range) - words[first].range.location) > 300 {
+            if last - focusIndex >= focusIndex - first && last > focusIndex {
+                last -= 1
+            } else if first < focusIndex {
+                first += 1
+            } else {
+                break
+            }
+        }
+        let selected = NSRange(location: words[first].range.location,
+                               length: NSMaxRange(words[last].range) -
+                                   words[first].range.location)
+        sentence = source.substring(with: selected)
+        offset -= selected.location
+        words = regex.matches(in: sentence,
+                              range: NSRange(location: 0,
+                                             length: (sentence as NSString).length))
+    }
     guard (1...60).contains(words.count), sentence.count <= 320,
           !sentence.unicodeScalars.contains(where: { (0x3400...0x9FFF).contains($0.value) }) else {
         return (nil, ms(start))

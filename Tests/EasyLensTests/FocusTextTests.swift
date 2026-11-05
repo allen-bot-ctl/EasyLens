@@ -58,6 +58,46 @@ final class FocusTextTests: XCTestCase {
         XCTAssertEqual(reconstructed, blocks.joined(separator: "\n"))
     }
 
+    func testMatchSelectionInBlocksProjectsBoundariesWhenInlineWidgetDiffers() {
+        let blocks = [
+            "What’s covered in these terms",
+            "We know it’s tempting to skip these Terms of Service, but it’s important to establish what you can expect from us as you use Google services?, and what we expect from you.",
+            "These Terms of Service reflect the way Google’s business works."
+        ]
+        let raw = "What’s covered in these termsWe know it’s tempting to skip these Terms of Service, but it’s important to establish what you can expect from us as you use Google services, and what we expect from you.These Terms of Service reflect the way Google’s business works."
+        let reconstructed = matchSelectionInBlocks(raw: raw, blocks: blocks)
+        let lines = reconstructed?.components(separatedBy: "\n") ?? []
+        XCTAssertEqual(lines.count, 3)
+        XCTAssertEqual(lines[0], "What’s covered in these terms")
+        XCTAssertTrue(lines[1].hasPrefix("We know it’s tempting to skip"))
+        XCTAssertEqual(lines[2], "These Terms of Service reflect the way Google’s business works.")
+    }
+
+    func testNormalizeSourceSelectionParagraphsSplitsHeadingAndPunctuatedParagraphSeams() {
+        let raw = "What’s covered in these termsWe know it’s tempting to skip these Terms of Service, but it’s important to establish what you can expect from us as you use Google services, and what we expect from you.These Terms of Service reflect the way Google’s business works, the laws that apply to our company, and certain things we’ve always believed to be true. As a result, these Terms of Service help define Google’s relationship with you as you interact with our services. For example, these terms include the following topic headings:• What you can expect from us, which describes how we provide and develop our services• What we expect from you, which establishes certain rules for using our services"
+        let normalized = normalizeSourceSelectionParagraphs(raw)
+        let lines = normalized.components(separatedBy: "\n")
+        XCTAssertEqual(lines.count, 5)
+        XCTAssertEqual(lines[0], "What’s covered in these terms")
+        XCTAssertEqual(lines[1], "We know it’s tempting to skip these Terms of Service, but it’s important to establish what you can expect from us as you use Google services, and what we expect from you.")
+        XCTAssertTrue(lines[2].hasPrefix("These Terms of Service reflect the way"))
+        XCTAssertTrue(lines[2].hasSuffix("following topic headings:"))
+        XCTAssertTrue(lines[3].hasPrefix("• What you can expect from us"))
+        XCTAssertTrue(lines[4].hasPrefix("• What we expect from you"))
+    }
+
+    func testNormalizeSourceSelectionParagraphsPreservesBrandNamesInProse() {
+        let prose = "You can use GitHub, JavaScript, DeepSeek, YouTube, iPhone, and macOS in your daily workflow."
+        XCTAssertEqual(normalizeSourceSelectionParagraphs(prose), prose)
+    }
+
+    func testEligibleEnglishTextAllowsMultiParagraphProseWithSlashesAndLongLength() {
+        let paragraph = "We know it’s tempting to skip these Terms of Service, and/or to overlook how country/region rules apply when you visit https://policies.google.com/terms or read our documentation."
+        let longSelection = Array(repeating: paragraph, count: 10).joined(separator: "\n")
+        XCTAssertGreaterThan(longSelection.count, 1200)
+        XCTAssertNotNil(eligibleEnglishText(longSelection, maxLength: 4000))
+    }
+
     func testFormatSelectionTranslationRestoresMiddleDotDelimitedList() {
         for dot in ["・", "·", "•"] {
             let input = [
