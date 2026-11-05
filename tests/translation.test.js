@@ -127,10 +127,12 @@ test('API key is stored outside settings.json with restricted permissions', () =
     assert.equal(saved.provider, 'deepSeek');
     assert.equal(store.deepSeekConfiguration().apiKey, 'sk-test-123');
 
-    const dirMode = fs.statSync(scratch).mode & 0o777;
-    const fileMode = fs.statSync(store.keyFile).mode & 0o777;
-    assert.equal(dirMode, 0o700);
-    assert.equal(fileMode, 0o600);
+    if (process.platform !== 'win32') {
+      const dirMode = fs.statSync(scratch).mode & 0o777;
+      const fileMode = fs.statSync(store.keyFile).mode & 0o777;
+      assert.equal(dirMode, 0o700);
+      assert.equal(fileMode, 0o600);
+    }
 
     const persisted = fs.readFileSync(store.settingsFile, 'utf8');
     assert.equal(persisted.includes('sk-test-123'), false);
