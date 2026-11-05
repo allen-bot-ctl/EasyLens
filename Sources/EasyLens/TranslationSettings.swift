@@ -1,5 +1,5 @@
 import AppKit
-import Security
+import Foundation
 import SwiftUI
 
 enum TranslationProvider: String, CaseIterable, Identifiable {
@@ -19,13 +19,13 @@ struct DeepSeekConfiguration {
 enum TranslationSettingsError: LocalizedError {
     case invalidBaseURL
     case missingAPIKey
-    case keychain(OSStatus)
+    case keyStorage(String)
 
     var errorDescription: String? {
         switch self {
         case .invalidBaseURL: return "接口地址需为有效的 HTTPS 地址。"
         case .missingAPIKey: return "请先保存 DeepSeek API Key。"
-        case .keychain(let status): return "无法访问钥匙串（错误码 \(status)）。"
+        case .keyStorage(let detail): return "无法访问本地密钥文件（\(detail)）。"
         }
     }
 }
@@ -34,8 +34,9 @@ enum TranslationSettingsError: LocalizedError {
 final class TranslationSettings: ObservableObject {
     static let defaultBaseURL = "https://api.deepseek.com"
     static let models = ["deepseek-flash", "deepseek-v4-pro"]
-    private static let keyService = "ai.nangua.EasyLens.DeepSeek"
-    private static let keyAccount = "api-key"
+    nonisolated static let defaultKeyFileURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".easylens", isDirectory: true)
+        .appendingPathComponent("deepseek-api-key", isDirectory: false)
 
     @Published private(set) var provider: TranslationProvider
     @Published private(set) var baseURL: String
@@ -43,16 +44,19 @@ final class TranslationSettings: ObservableObject {
     @Published private(set) var hasAPIKey: Bool
     var onChange: (() -> Void)?
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard,
+         keyFileURL: URL = TranslationSettings.defaultKeyFileURL) {
         self.defaults = defaults
+        self.keyFileURL = keyFileURL
         provider = TranslationProvider(rawValue: defaults.string(forKey: "translationProvider") ?? "") ?? .local
         baseURL = defaults.string(forKey: "deepSeekBaseURL") ?? Self.defaultBaseURL
         let savedModel = defaults.string(forKey: "deepSeekModel") ?? ""
         model = Self.models.contains(savedModel) ? savedModel : Self.models[0]
-        hasAPIKey = (try? Self.readAPIKey()) != nil
+        hasAPIKey = (try? Self.readAPIKey(from: keyFileURL)) != nil
     }
 
     private let defaults: UserDefaults
+    private let keyFileURL: URL
 
     static func validatedBaseURL(_ value: String) -> URL? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -72,8 +76,8 @@ final class TranslationSettings: ObservableObject {
         }
         guard Self.models.contains(model) else { throw TranslationSettingsError.invalidBaseURL }
         let key = newAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !key.isEmpty { try Self.storeAPIKey(key) }
-        let available = try Self.readAPIKey() != nil
+        if !key.isEmpty { try Self.storeAPIKey(key, to: keyFileURL) }
+        let available = try Self.readAPIKey(from: keyFileURL) != nil
         guard provider != .deepSeek || available else {
             throw TranslationSettingsError.missingAPIKey
         }
@@ -88,9 +92,12 @@ final class TranslationSettings: ObservableObject {
     }
 
     func removeAPIKey() throws {
-        let status = SecItemDelete(Self.keyQuery() as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw TranslationSettingsError.keychain(status)
+        do {
+            if FileManager.default.fileExists(atPath: keyFileURL.path) {
+                try FileManager.default.removeItem(at: keyFileURL)
+            }
+        } catch {
+            throw TranslationSettingsError.keyStorage(error.localizedDescription)
         }
         hasAPIKey = false
         if provider == .deepSeek {
@@ -104,48 +111,34 @@ final class TranslationSettings: ObservableObject {
         guard let url = Self.validatedBaseURL(baseURL) else {
             throw TranslationSettingsError.invalidBaseURL
         }
-        guard let key = try Self.readAPIKey() else {
+        guard let key = try Self.readAPIKey(from: keyFileURL) else {
             throw TranslationSettingsError.missingAPIKey
         }
         return DeepSeekConfiguration(baseURL: url, model: model, apiKey: key)
     }
 
-    private static func keyQuery() -> [String: Any] {
-        [kSecClass as String: kSecClassGenericPassword,
-         kSecAttrService as String: keyService,
-         kSecAttrAccount as String: keyAccount]
-    }
-
-    private static func readAPIKey() throws -> String? {
-        var query = keyQuery()
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var value: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &value)
-        if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess else { throw TranslationSettingsError.keychain(status) }
-        guard let data = value as? Data,
-              let key = String(data: data, encoding: .utf8), !key.isEmpty else {
-            throw TranslationSettingsError.keychain(errSecDecode)
+    private static func readAPIKey(from fileURL: URL) throws -> String? {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
+        do {
+            let key = try String(contentsOf: fileURL, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return key.isEmpty ? nil : key
+        } catch {
+            throw TranslationSettingsError.keyStorage(error.localizedDescription)
         }
-        return key
     }
 
-    private static func storeAPIKey(_ key: String) throws {
-        let data = Data(key.utf8)
-        let existing = SecItemCopyMatching(keyQuery() as CFDictionary, nil)
-        if existing == errSecSuccess {
-            let status = SecItemUpdate(keyQuery() as CFDictionary,
-                                       [kSecValueData as String: data] as CFDictionary)
-            guard status == errSecSuccess else { throw TranslationSettingsError.keychain(status) }
-        } else if existing == errSecItemNotFound {
-            var attributes = keyQuery()
-            attributes[kSecValueData as String] = data
-            attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            let status = SecItemAdd(attributes as CFDictionary, nil)
-            guard status == errSecSuccess else { throw TranslationSettingsError.keychain(status) }
-        } else {
-            throw TranslationSettingsError.keychain(existing)
+    private static func storeAPIKey(_ key: String, to fileURL: URL) throws {
+        let directory = fileURL.deletingLastPathComponent()
+        let fm = FileManager.default
+        do {
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true,
+                                   attributes: [.posixPermissions: 0o700])
+            try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+            try Data(key.utf8).write(to: fileURL, options: .atomic)
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+        } catch {
+            throw TranslationSettingsError.keyStorage(error.localizedDescription)
         }
     }
 }
@@ -179,7 +172,7 @@ struct TranslationSettingsView: View {
                 SecureField(settings.hasAPIKey ? "已保存；留空则保持原密钥" : "输入 API Key", text: $apiKey)
                     .textFieldStyle(.roundedBorder)
                 HStack {
-                    Text(settings.hasAPIKey ? "密钥已保存在此 Mac 的钥匙串" : "输入密钥并保存后可测试连接")
+                    Text(settings.hasAPIKey ? "密钥已保存在 ~/.easylens" : "输入密钥并保存后可测试连接")
                         .foregroundStyle(.secondary)
                     Spacer()
                     if settings.hasAPIKey {

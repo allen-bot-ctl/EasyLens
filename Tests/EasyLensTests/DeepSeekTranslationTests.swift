@@ -48,6 +48,41 @@ final class DeepSeekTranslationTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testAPIKeyStoresInLocalDirectoryWithRestrictedPermissions() throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("easylens-settings-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let keyDir = scratch.appendingPathComponent(".easylens", isDirectory: true)
+        let keyFile = keyDir.appendingPathComponent("deepseek-api-key", isDirectory: false)
+        let suiteName = "EasyLensTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = TranslationSettings(defaults: defaults, keyFileURL: keyFile)
+        XCTAssertFalse(settings.hasAPIKey)
+
+        try settings.save(provider: .deepSeek,
+                          baseURL: "https://api.deepseek.com",
+                          model: "deepseek-flash",
+                          newAPIKey: "  sk-test-123  \n")
+        XCTAssertTrue(settings.hasAPIKey)
+        XCTAssertEqual(settings.provider, .deepSeek)
+
+        let config = try settings.deepSeekConfiguration()
+        XCTAssertEqual(config.apiKey, "sk-test-123")
+
+        let dirMode = (try FileManager.default.attributesOfItem(atPath: keyDir.path)[.posixPermissions] as? NSNumber)?.intValue
+        let fileMode = (try FileManager.default.attributesOfItem(atPath: keyFile.path)[.posixPermissions] as? NSNumber)?.intValue
+        XCTAssertEqual(dirMode, 0o700)
+        XCTAssertEqual(fileMode, 0o600)
+
+        try settings.removeAPIKey()
+        XCTAssertFalse(settings.hasAPIKey)
+        XCTAssertEqual(settings.provider, .local)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: keyFile.path))
+    }
+
     private var configuration: DeepSeekConfiguration {
         DeepSeekConfiguration(baseURL: URL(string: "https://api.deepseek.com")!,
                               model: "deepseek-flash", apiKey: "test-key")

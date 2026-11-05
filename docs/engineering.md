@@ -12,7 +12,7 @@
 | `FocusOCR.swift`、`FocusText.swift` | Vision OCR、焦点词定位、英文判断、上下文与结果推导。 |
 | `LocalTranslation.swift` | Translation 框架的单词与选区翻译桥接。 |
 | `DeepSeekTranslation.swift` | DeepSeek Chat Completions 请求及响应解析。 |
-| `TranslationSettings.swift` | 翻译来源、接口地址、模型与钥匙串密钥，以及设置窗口。 |
+| `TranslationSettings.swift` | 翻译来源、接口地址、模型与 `~/.easylens` 密钥存储，以及设置窗口。 |
 | `TranslationLanguageSetup.swift` | 英中资源就绪检查、首次使用引导、系统下载请求。 |
 | `EyeLensView.swift` | 透明眼睛和识别成功状态的绘制。 |
 | `EasyLensAppDelegate.swift` | 菜单栏、快捷键、屏幕捕获、异步调度与结果展示。 |
@@ -24,7 +24,7 @@
 
 使用本地翻译时查询英语到简体中文的系统翻译语言状态。未安装时打开 EasyLens 说明窗口；用户点击「下载语言」后调用 `TranslationSession.prepareTranslation()`，macOS 显示下载确认窗口。EasyLens 定期复查，资源就绪后恢复翻译；用户可从菜单栏重新打开说明。下载中或不可用时不会发起翻译请求。系统资源由 macOS 管理，应用不自行下载语言包。
 
-屏幕画面由 ScreenCaptureKit 读取，选区辅助使用 Accessibility。首次唤醒时若录屏未授权，EasyLens 先说明用途并提供系统授权入口；权限就绪前不启动捕获，避免反复触发原生权限弹窗。若 macOS 的录屏应用列表没有 EasyLens，可以点击列表底部“＋”，在文件选择窗口用 ⇧⌘G 输入引导窗口展示的 `.app` 完整路径并添加；系统可能要求退出并重新打开应用。辅助功能未授权时另行说明完整选区翻译的依赖。菜单栏持续显示两项授权状态。读取选区时记录最近激活的外部应用，避免权限说明窗口或菜单栏短暂激活 EasyLens 时把自身误作目标。仅辅助功能权限不足时仍可单词翻译。应用不保存或发送截图。选择 DeepSeek 时，焦点词及句子上下文或完整选区会发送至所配置的 HTTPS 接口；切换来源会清除翻译缓存并使旧请求失效。API Key 存在 macOS 钥匙串，非敏感设置存在 UserDefaults。
+屏幕画面由 ScreenCaptureKit 读取，选区辅助使用 Accessibility。首次唤醒时若录屏未授权，EasyLens 先说明用途并提供系统授权入口；权限就绪前不启动捕获，避免反复触发原生权限弹窗。若 macOS 的录屏应用列表没有 EasyLens，可以点击列表底部“＋”，在文件选择窗口用 ⇧⌘G 输入引导窗口展示的 `.app` 完整路径并添加；系统可能要求退出并重新打开应用。辅助功能未授权时另行说明完整选区翻译的依赖。菜单栏持续显示两项授权状态。读取选区时记录最近激活的外部应用，避免权限说明窗口或菜单栏短暂激活 EasyLens 时把自身误作目标。仅辅助功能权限不足时仍可单词翻译。应用不保存或发送截图。选择 DeepSeek 时，焦点词及句子上下文或完整选区会发送至所配置的 HTTPS 接口；切换来源会清除翻译缓存并使旧请求失效。API Key 保存在 `~/.easylens/deepseek-api-key`（目录 `0700`、文件 `0600`），避免无公证本地构建访问钥匙串时触发密码弹窗；非敏感设置存在 UserDefaults。
 
 远端请求启动后，约 180 毫秒仍未返回才显示等待卡；缓存命中和快速响应直接显示译文。等待卡复用翻译浮窗，显示目标词或“完整选区”及轻微动态点，眼睛的黄色成功态只由实际译文触发。指针移动、目标变化、请求失效和错误会清除等待态；结果到达时先收起旧卡再展示译文。视觉选区短暂漏检时先复核，避免选区译文被单词译文瞬间覆盖。
 

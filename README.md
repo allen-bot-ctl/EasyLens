@@ -2,7 +2,7 @@
 
 EasyLens 是 macOS 菜单栏中的英译中应用。按 **⌃⌥L** 唤出跟随鼠标的透明眼睛，停留在英文单词上可查看中文；鼠标中心落在已选文字上时，优先翻译完整选区。按 **Esc** 隐藏眼睛。非英文内容不进入翻译流程。
 
-当前实现使用 macOS 15 及以上系统的 ScreenCaptureKit、Vision、Accessibility 和 Translation，默认本地翻译。菜单栏「设置…」可填入 DeepSeek API Key、HTTPS 接口地址并选择模型，点击「保存」后可先「测试连接」，再将翻译来源切换为 DeepSeek。密钥保存在 macOS 钥匙串；选择 DeepSeek 后会向配置的接口发送待译文字，不发送或保存截图。应用只在菜单栏显示，Dock 中没有图标。
+当前实现使用 macOS 15 及以上系统的 ScreenCaptureKit、Vision、Accessibility 和 Translation，默认本地翻译。菜单栏「设置…」可填入 DeepSeek API Key、HTTPS 接口地址并选择模型，点击「保存」后可先「测试连接」，再将翻译来源切换为 DeepSeek。密钥保存在 `~/.easylens/`（仅当前用户可读写）；选择 DeepSeek 后会向配置的接口发送待译文字，不发送或保存截图。应用只在菜单栏显示，Dock 中没有图标。
 
 ## 构建与运行
 
