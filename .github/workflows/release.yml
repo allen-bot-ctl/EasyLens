@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    name: Build and publish Linux packages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build Linux AppImage and directory bundle
+        run: npx electron-builder --linux AppImage dir
+
+      - name: Package unpacked directory
+        run: |
+          set -euo pipefail
+          cd dist/linux-unpacked
+          zip -qr "../EasyLens-${GITHUB_REF_NAME}-linux-x86_64-dir.zip" .
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: EasyLens ${{ github.ref_name }}
+          body: |
+            ## EasyLens ${{ github.ref_name }}
+
+            面向 Linux 的 EasyLens 发布包。
+
+            ### 下载
+
+            - `EasyLens-*.AppImage`：直接运行的 Linux x86_64 包。下载后执行 `chmod +x EasyLens-*.AppImage`，再运行该文件。
+            - `EasyLens-*-linux-x86_64-dir.zip`：解压后的目录包，适合没有 AppImage 运行时的环境。解压后运行 `easylens`。
+
+            ### 使用
+
+            - 启动后驻留系统托盘，不创建常驻主窗口。
+            - `Ctrl+Alt+L`：显示或隐藏跟随鼠标的透明眼睛；`Esc`：隐藏。
+            - 鼠标停在英文上查看中文。内置约 26,282 条离线英汉词条，屏幕文字使用本机 OCR，选区包含焦点词时优先翻译完整选区。
+            - 托盘菜单「设置…」可以选择离线词典或 DeepSeek，并配置接口、模型和 API Key。
+
+            ### 说明
+
+            - 当前只提供 Linux Electron 构建，尚未提供官方 macOS / Windows 安装包。`Sources/EasyLens/` 中的 macOS Swift 工程仅作参考，需要 Xcode 构建。
+            - 发布包不包含 API Key、`.env` 或用户主目录配置；DeepSeek 密钥只保存在用户本机的 `~/.easylens/`。
+            - 默认不持久化截图。启用 DeepSeek 时只发送待译文字，不发送截图。
+          files: |
+            dist/*.AppImage
+            dist/EasyLens-*-linux-x86_64-dir.zip
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

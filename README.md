@@ -1,5 +1,7 @@
 # EasyLens
 
+[项目主页](https://allen-bot-ctl.github.io/EasyLens/) · [下载最新 Release](https://github.com/allen-bot-ctl/EasyLens/releases/latest) · [从源码运行](#快速开始electron)
+
 EasyLens 是菜单栏/托盘中的英译中应用。按 **Ctrl+Alt+L**（macOS 语义为 ⌃⌥L）唤出跟随鼠标的透明眼睛，停留在英文单词上可查看中文；按 **Esc** 隐藏眼睛。非英文内容不进入翻译流程。鼠标中心位于已选文字上时，优先翻译完整选区（Linux 使用 PRIMARY/剪贴板回退，见下文）。
 
 当前正式可运行入口已经迁移到 **Electron**，可在 Linux 上安装、启动和构建；原 macOS 15+ Swift/ScreenCaptureKit/Vision/Accessibility/Translation 工程保留在 `Sources/EasyLens/` 作为行为参考，不再作为默认构建入口。
