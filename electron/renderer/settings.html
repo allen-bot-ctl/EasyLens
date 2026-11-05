@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self';">
+  <title>EasyLens · 设置</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      background: #16181d;
+      color: #eef1f6;
+      padding: 26px 30px 24px;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    h1 {
+      margin: 0 0 6px;
+      font-size: 21px;
+      font-weight: 650;
+      letter-spacing: 0.01em;
+    }
+    .sub {
+      margin: 0 0 22px;
+      color: #9aa3b2;
+      font-size: 12.5px;
+      line-height: 1.55;
+    }
+    .group {
+      display: grid;
+      gap: 14px;
+      padding: 18px;
+      border: 1px solid #2a2f39;
+      border-radius: 13px;
+      background: #1b1e25;
+    }
+    .field { display: grid; gap: 6px; }
+    label { font-weight: 550; color: #dfe4ee; }
+    .note { color: #8f98a8; font-size: 12px; }
+    input, select {
+      width: 100%;
+      border: 1px solid #343a46;
+      border-radius: 8px;
+      background: #111318;
+      color: #eef1f6;
+      padding: 9px 11px;
+      font: inherit;
+      outline: none;
+    }
+    input:focus, select:focus {
+      border-color: #6c84b8;
+      box-shadow: 0 0 0 3px rgba(108, 132, 184, 0.16);
+    }
+    input::placeholder { color: #6f7786; }
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .row-between { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .key-status { color: #8f98a8; font-size: 12px; }
+    .privacy {
+      margin: 16px 0 0;
+      padding: 11px 13px;
+      border-radius: 9px;
+      background: #1c2029;
+      color: #98a2b3;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .message {
+      min-height: 20px;
+      margin-top: 12px;
+      font-size: 12.5px;
+      color: #aeb8c8;
+    }
+    .message.error { color: #ff9a94; }
+    .message.success { color: #8fd6a6; }
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin-top: 20px;
+    }
+    .spacer { flex: 1; }
+    button {
+      border: 1px solid #3a4150;
+      border-radius: 8px;
+      background: #252a34;
+      color: #eef1f6;
+      padding: 8px 15px;
+      font: inherit;
+      font-weight: 550;
+      cursor: pointer;
+    }
+    button:hover { background: #2e3441; }
+    button:disabled { opacity: 0.45; cursor: default; }
+    button.primary {
+      border-color: #5875b2;
+      background: #3f5f9e;
+    }
+    button.primary:hover { background: #4b6cae; }
+    button.danger {
+      border-color: #58343a;
+      background: #2b2024;
+      color: #ffaaa4;
+    }
+    button.ghost {
+      border-color: transparent;
+      background: transparent;
+      color: #b9c2d1;
+    }
+  </style>
+</head>
+<body>
+  <h1>EasyLens 设置</h1>
+  <p class="sub">默认使用内置英汉词典。选择 DeepSeek 后，待翻译文字会发送到下方 HTTPS 接口；截图不会上传或保存。</p>
+
+  <form id="form">
+    <div class="group">
+      <div class="field">
+        <label for="provider">翻译来源</label>
+        <select id="provider">
+          <option value="local">本地词典（离线）</option>
+          <option value="deepSeek">DeepSeek（云端）</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="baseURL">接口地址</label>
+        <input id="baseURL" type="url" spellcheck="false" placeholder="https://api.deepseek.com" autocomplete="off">
+        <div class="note">必须是 HTTPS 地址，可带 `/v1` 等路径；实际请求会追加 `/chat/completions`。</div>
+      </div>
+
+      <div class="field">
+        <label for="model">DeepSeek 模型</label>
+        <select id="model">
+          <option value="deepseek-flash">deepseek-flash · V4.1 Flash</option>
+          <option value="deepseek-v4-pro">deepseek-v4-pro · V4 Pro</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="apiKey">API Key</label>
+        <input id="apiKey" type="password" spellcheck="false" autocomplete="new-password">
+        <div class="row-between">
+          <span class="key-status" id="keyStatus">尚未保存密钥</span>
+          <button type="button" class="danger" id="removeKey" hidden>移除密钥</button>
+        </div>
+      </div>
+    </div>
+  </form>
+
+  <p class="privacy">密钥保存在 <code>~/.easylens/deepseek-api-key</code>（目录 0700、文件 0600），不会写入仓库。选择本地词典时不会发起网络请求。</p>
+  <div class="message" id="message" role="status"></div>
+
+  <div class="actions">
+    <button type="button" id="test">测试连接</button>
+    <span class="spacer"></span>
+    <button type="button" class="ghost" id="close">关闭</button>
+    <button type="submit" form="form" class="primary" id="save">保存</button>
+  </div>
+
+  <script src="settings.js"></script>
+</body>
+</html>
