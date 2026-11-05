@@ -49,11 +49,29 @@
     return amount.toFixed(index === 0 ? 0 : 1) + " " + units[index];
   }
 
-  function assetRank(name) {
-    if (/\.appimage$/i.test(name)) return 0;
-    if (/(dir|linux).*\.(zip|tar\.gz)$/i.test(name)) return 1;
-    if (/\.(zip|tar\.gz)$/i.test(name)) return 2;
-    return 3;
+  function assetInfo(name) {
+    if (/mac.*arm64.*\.(dmg|zip)$/i.test(name)) {
+      return { rank: 1, label: "macOS Apple Silicon (arm64)" };
+    }
+    if (/mac.*(x64|amd64).*\.(dmg|zip)$/i.test(name)) {
+      return { rank: 2, label: "macOS Intel (x64)" };
+    }
+    if (/win.*\.exe$/i.test(name)) {
+      return { rank: 0, label: "Windows x64" };
+    }
+    if (/linux.*\.(appimage|zip|tar\.gz)$/i.test(name) || /\.appimage$/i.test(name)) {
+      return { rank: 3, label: "Linux x86_64" };
+    }
+    if (/\.dmg$/i.test(name)) return { rank: 1, label: "macOS" };
+    if (/\.exe$/i.test(name)) return { rank: 0, label: "Windows" };
+    if (/\.(appimage|deb|rpm|snap)$/i.test(name)) return { rank: 3, label: "Linux" };
+    return { rank: 9, label: "其他" };
+  }
+
+  function artifactKindRank(name) {
+    if (/\.(dmg|exe|appimage)$/i.test(name)) return 0;
+    if (/\.zip$/i.test(name)) return 1;
+    return 2;
   }
 
   function renderAssets(assets) {
@@ -65,21 +83,32 @@
         return asset && asset.name && asset.browser_download_url;
       })
       .sort(function (left, right) {
-        return assetRank(left.name) - assetRank(right.name) || left.name.localeCompare(right.name);
+        var leftInfo = assetInfo(left.name);
+        var rightInfo = assetInfo(right.name);
+        return (
+          leftInfo.rank - rightInfo.rank ||
+          artifactKindRank(left.name) - artifactKindRank(right.name) ||
+          left.name.localeCompare(right.name)
+        );
       });
 
     visible.forEach(function (asset) {
+      var info = assetInfo(asset.name);
       var link = document.createElement("a");
       link.className = "asset-link";
       link.href = asset.browser_download_url;
       link.rel = "noreferrer";
+      link.title = info.label + " · " + asset.name;
       link.innerHTML =
         '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 5-5m-5 5-5-5M5 21h14"/></svg>' +
-        '<span class="asset-name"></span><span class="asset-size"></span>';
+        '<span class="asset-main"><span class="asset-name"></span><span class="asset-platform"></span></span>' +
+        '<span class="asset-size"></span>';
 
       var nameEl = link.querySelector(".asset-name");
+      var platformEl = link.querySelector(".asset-platform");
       var sizeEl = link.querySelector(".asset-size");
       if (nameEl) nameEl.textContent = asset.name;
+      if (platformEl) platformEl.textContent = info.label;
       if (sizeEl) sizeEl.textContent = formatBytes(asset.size);
       assetsEl.appendChild(link);
     });
@@ -90,7 +119,7 @@
 
   function showNoRelease() {
     if (statusEl) statusEl.textContent = "尚未发布首个 Release";
-    setFallback("即将提供 Linux AppImage，也可从源码构建。按钮仍会打开最新 Release 页面。");
+    setFallback("即将提供 Linux、Windows x64 与 macOS（Intel / Apple Silicon）安装包，也可从源码构建。按钮仍会打开最新 Release 页面。");
   }
 
   function showRelease(release) {

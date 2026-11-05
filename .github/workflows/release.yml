@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   linux:
-    name: Build and publish Linux packages
+    name: Build Linux x86_64 packages
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -32,14 +32,111 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Read package version
+        id: package-version
+        run: echo "version=$(node -p \"require('./package.json').version\")" >> "$GITHUB_OUTPUT"
+
       - name: Build Linux AppImage and directory bundle
-        run: npx electron-builder --linux AppImage dir --publish never
+        run: npx electron-builder --linux AppImage dir --x64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
       - name: Package unpacked directory
         run: |
           set -euo pipefail
           cd dist/linux-unpacked
-          zip -qr "../EasyLens-${GITHUB_REF_NAME}-linux-x86_64-dir.zip" .
+          zip -qr "../EasyLens-${{ steps.package-version.outputs.version }}-linux-x64-dir.zip" .
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          if-no-files-found: error
+          path: |
+            dist/*.AppImage
+            dist/EasyLens-*-linux-*-dir.zip
+
+  windows:
+    name: Build Windows x64 installer
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        shell: bash
+        run: node --test tests/*.test.js
+
+      - name: Build Windows x64 NSIS installer
+        run: npx electron-builder --win nsis --x64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          if-no-files-found: error
+          path: dist/*.exe
+
+  macos:
+    name: Build macOS Intel and Apple Silicon packages
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build macOS dmg and zip for x64 and arm64
+        run: npx electron-builder --mac dmg zip --x64 --arm64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-x64-arm64
+          if-no-files-found: error
+          path: |
+            dist/EasyLens-*-mac-*.dmg
+            dist/EasyLens-*-mac-*.zip
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - linux
+      - windows
+      - macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List release files
+        run: ls -lh dist
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -48,12 +145,32 @@ jobs:
           body: |
             ## EasyLens ${{ github.ref_name }}
 
-            面向 Linux 的 EasyLens 发布包。
+            本次发布包含 Linux x86_64、Windows x64、macOS Intel（x64）和 macOS Apple Silicon（arm64）构建。
 
-            ### 下载
+            ### Linux（x86_64）
 
-            - `EasyLens-*.AppImage`：直接运行的 Linux x86_64 包。下载后执行 `chmod +x EasyLens-*.AppImage`，再运行该文件。
-            - `EasyLens-*-linux-x86_64-dir.zip`：解压后的目录包，适合没有 AppImage 运行时的环境。解压后运行 `easylens`。
+            - `EasyLens-*-linux-x64.AppImage`：直接运行的 AppImage。下载后执行 `chmod +x EasyLens-*-linux-x64.AppImage`，再运行该文件。
+            - `EasyLens-*-linux-x64-dir.zip`：解压后的目录包，适合没有 AppImage 运行时的环境。解压后运行目录内的 `easylens`。
+
+            ### Windows（x64）
+
+            - `EasyLens-*-win-x64.exe`：NSIS 安装包，仅支持 64 位 Windows。
+            - 安装包未签名。Windows SmartScreen 可能提示“已保护你的电脑”，需要点击“更多信息”，再选择“仍要运行”。
+
+            ### macOS Intel（x64）
+
+            - `EasyLens-*-mac-x64.dmg`：推荐下载，打开后把 EasyLens 拖入“应用程序”。
+            - `EasyLens-*-mac-x64.zip`：备用压缩包，解压后得到 `EasyLens.app`。
+
+            ### macOS Apple Silicon（arm64，M 系列芯片）
+
+            - `EasyLens-*-mac-arm64.dmg`：推荐下载，打开后把 EasyLens 拖入“应用程序”。
+            - `EasyLens-*-mac-arm64.zip`：备用压缩包，解压后得到 `EasyLens.app`。
+
+            ### macOS 未签名说明
+
+            当前没有 Apple Developer 证书，macOS 包未签名、未公证。Gatekeeper 可能阻止首次打开：
+            在“系统设置 → 隐私与安全性”中选择“仍要打开”，或右键点击 EasyLens 后选择“打开”。
 
             ### 使用
 
@@ -64,12 +181,16 @@ jobs:
 
             ### 说明
 
-            - 当前只提供 Linux Electron 构建，尚未提供官方 macOS / Windows 安装包。`Sources/EasyLens/` 中的 macOS Swift 工程仅作参考，需要 Xcode 构建。
+            - 所有构建均未做代码签名或公证。Windows SmartScreen 与 macOS Gatekeeper 可能要求用户手动允许。
+            - `Sources/EasyLens/` 中的 macOS Swift 工程仅作参考，需要 Xcode 构建，不是当前默认分发形式。
             - 发布包不包含 API Key、`.env` 或用户主目录配置；DeepSeek 密钥只保存在用户本机的 `~/.easylens/`。
             - 默认不持久化截图。启用 DeepSeek 时只发送待译文字，不发送截图。
           files: |
             dist/*.AppImage
-            dist/EasyLens-*-linux-x86_64-dir.zip
+            dist/EasyLens-*-linux-*-dir.zip
+            dist/EasyLens-*-win-*.exe
+            dist/EasyLens-*-mac-*.dmg
+            dist/EasyLens-*-mac-*.zip
           fail_on_unmatched_files: true
           draft: false
           prerelease: false

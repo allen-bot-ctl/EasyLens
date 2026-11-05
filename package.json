@@ -1,6 +1,6 @@
 {
   "name": "easylens",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "EasyLens: a tray eye lens that translates English under the cursor into Chinese.",
   "homepage": "https://allen-bot-ctl.github.io/EasyLens/",
@@ -52,11 +52,36 @@
       "artifactName": "EasyLens-${version}-linux-${arch}.${ext}",
       "icon": "electron/assets/icon.png"
     },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "EasyLens-${version}-win-${arch}.${ext}"
+    },
     "mac": {
       "target": [
-        "dir"
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
       ],
       "category": "public.app-category.utilities",
+      "artifactName": "EasyLens-${version}-mac-${arch}.${ext}",
       "extendInfo": {
         "LSUIElement": true
       }
