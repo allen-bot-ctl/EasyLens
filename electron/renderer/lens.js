@@ -7,7 +7,6 @@ const HEIGHT = 114;
 
 let reading = false;
 let translated = false;
-let suppressed = false;
 
 function resize() {
   const ratio = window.devicePixelRatio || 1;
@@ -16,6 +15,8 @@ function resize() {
   canvas.style.width = `${WIDTH}px`;
   canvas.style.height = `${HEIGHT}px`;
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  scheduler.ensureRendering();
+  scheduler.redraw();
 }
 
 function eyePath(rect) {
@@ -40,7 +41,6 @@ function eyePath(rect) {
 function draw() {
   const now = performance.now() / 1000;
   context.clearRect(0, 0, WIDTH, HEIGHT);
-  if (suppressed) return;
 
   const rect = { x: 3, y: 3, width: WIDTH - 6, height: HEIGHT - 6 };
   const center = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
@@ -201,22 +201,34 @@ function draw() {
     context.strokeStyle = `rgba(180, 210, 230, ${0.10 + 0.08 * breath})`;
     context.stroke();
   }
+}
 
-  requestAnimationFrame(draw);
+const scheduler = window.EasyLensLensScheduler.createLensScheduler({ drawFrame: draw });
+
+function wakeRenderer() {
+  scheduler.ensureRendering();
+  scheduler.redraw();
 }
 
 window.easylens.onLensState((payload) => {
   if (!payload) return;
   reading = Boolean(payload.reading);
   translated = Boolean(payload.translated);
+  wakeRenderer();
 });
 
 window.easylens.onLensSuppress((value) => {
-  suppressed = Boolean(value);
-  canvas.style.opacity = suppressed ? '0' : '1';
+  const next = Boolean(value);
+  canvas.style.opacity = next ? '0' : '1';
+  scheduler.setSuppressed(next);
 });
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) wakeRenderer();
+});
+window.addEventListener('pageshow', wakeRenderer);
+window.addEventListener('focus', wakeRenderer);
 
 resize();
 window.addEventListener('resize', resize);
 window.easylens.lensReady();
-requestAnimationFrame(draw);

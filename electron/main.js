@@ -315,6 +315,9 @@ function showLens() {
   const frame = lensFrame(pointer);
   lensWindow.setBounds({ x: frame.x, y: frame.y, width: LENS_WIDTH, height: LENS_HEIGHT });
   lensWindow.showInactive();
+  // The renderer treats a false suppression value as a wake signal and
+  // re-arms its animation loop immediately.
+  suppressLens(false);
   registerEscape();
   startTick();
   rememberClipboard(pointer, true);
@@ -506,11 +509,13 @@ async function captureAroundCursor(pointer) {
     if (!source) throw new Error('no screen source');
     thumbnail = source.thumbnail;
   } finally {
-    suppressLens(false);
     if (restoreLens && state.visible && lensWindow && !lensWindow.isDestroyed()) {
       updateLensPosition(pointer);
       lensWindow.showInactive();
     }
+    // Send this after showInactive so it both restores opacity and wakes the
+    // renderer loop even if the window was hidden for the capture.
+    suppressLens(false);
   }
 
   const size = thumbnail.getSize();
@@ -927,6 +932,7 @@ function registerIpc() {
 
   ipcMain.on('lens:ready', () => {
     sendLens({ translated: false, reading: false });
+    suppressLens(false);
   });
 }
 
