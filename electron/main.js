@@ -485,33 +485,44 @@ function tick() {
   if (!state.lastInspectedPointer) {
     state.lastInspectedPointer = { x: pointer.x, y: pointer.y };
   }
-  // Measure from the last successfully inspected spot, not from the previous
-  // 16ms frame. Slow steady moves accumulate 3px and must reopen inspection.
+
+  // 1. 物理帧间位移：仅用于判断用户的鼠标当前是否正在物理移动
+  const frameDistance = Math.hypot(pointer.x - state.pointer.x, pointer.y - state.pointer.y);
+  state.pointer = pointer;
+  state.lastMoveDistance = frameDistance;
+
+  // 只有手在物理移动鼠标时，才刷新 lastMoveAt
+  if (frameDistance >= 1.5) {
+    state.lastMoveAt = now;
+  }
+
+  // 2. 相对上次锚点的累计位移：用于判断停稳后是否离开了旧词、需要触发新识别
   const distance = distanceFrom(pointer, state.lastInspectedPointer);
   const movement = classifyPointerMove(distance);
-  state.pointer = pointer;
-  state.lastMoveDistance = distance;
   if (movement !== 'stationary') {
-    state.lastMoveAt = now;
-    // Re-inspect after the pointer settles, but do not burn a new generation
-    // for trackpad jitter: that used to drop in-flight DeepSeek responses.
     state.inspectedGeneration = -1;
     state.nextInspectionAt = 0;
     state.misses = 0;
     if (shouldResetFocus(distance)) {
-      state.generation += 1;
-      finishRemoteLoading();
-      state.currentAnchor = null;
-      state.currentSentence = null;
-      state.pendingWordKey = null;
-      state.activeSelectionHint = null;
-      state.pendingSelectionText = null;
-      state.selectionRequestId += 1;
-      hideCard();
-      sendLens({ reading: false });
+      // 只有之前有锚点时才递增 generation 并清理，避免静止在新词上每帧空转自增
+      if (state.currentAnchor || state.currentSentence) {
+        state.generation += 1;
+        finishRemoteLoading();
+        state.currentAnchor = null;
+        state.currentSentence = null;
+        state.pendingWordKey = null;
+        state.activeSelectionHint = null;
+        state.pendingSelectionText = null;
+        state.selectionRequestId += 1;
+        hideCard();
+        sendLens({ reading: false });
+      }
     }
   }
+
   if (state.loadingShown) positionCard();
+
+  // 当鼠标停稳超过 100ms，且当前点未被当前世代检查过时，立即触发识别
   if (!state.scanning && now - state.lastMoveAt >= 0.10 &&
       state.inspectedGeneration !== state.generation && now >= state.nextInspectionAt) {
     inspectFocus();
