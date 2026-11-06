@@ -110,7 +110,12 @@ jobs:
       - name: Build macOS selection reader
         run: |
           mkdir -p electron/bin
-          swiftc -O Sources/EasyLens/SelectionReader.swift electron/native/macos-selection-main.swift -o electron/bin/macos-selection-reader
+          swiftc -O \
+            Sources/EasyLens/SelectionReader.swift \
+            Sources/EasyLens/FocusText.swift \
+            electron/native/FocusedTranslationStub.swift \
+            electron/native/macos-selection-main.swift \
+            -o electron/bin/macos-selection-reader
 
       # Ad-hoc signing ("identity": null in package.json) is required so Release
       # dmg/app are signed and the TCC CDHash does not go unsigned across updates.
