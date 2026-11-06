@@ -27,6 +27,33 @@ function captureHidesLens(platform) {
   return platform === 'linux';
 }
 
+// Suppressing paint exists only to make the Linux root-window capture clean.
+// macOS/Windows keep the eye painted; the lens already has a transparent hole
+// over the word, so there is no need to dim the whole window around each shot.
+function shouldSuppressLensForCapture(platform) {
+  return platform === 'linux';
+}
+
+// The current pointer position has been scanned (hit, miss, error or reuse).
+// Keeping inspectedGeneration equal to generation is the invariant that stops
+// tick() from recapturing the same stationary spot. Only a real pointer move
+// can reset it and reopen inspection.
+function markInspectionComplete(state) {
+  if (!state) return state;
+  state.inspectedGeneration = state.generation;
+  return state;
+}
+
+// OCR sentence punctuation can jitter while the anchor stays the same. Keep
+// the in-flight DeepSeek request alive unless the word changed or the pointer
+// made a real focus-break move.
+function shouldCancelPendingWord({ currentAnchor, nextAnchor, distance }) {
+  const current = currentAnchor || null;
+  const next = nextAnchor || null;
+  if (current !== next) return true;
+  return Number.isFinite(distance) && distance >= FOCUS_BREAK_PX;
+}
+
 function shouldReuseCapture({
   now,
   lastCaptureAt,
@@ -153,6 +180,9 @@ module.exports = {
   classifyPointerMove,
   shouldResetFocus,
   captureHidesLens,
+  shouldSuppressLensForCapture,
+  markInspectionComplete,
+  shouldCancelPendingWord,
   shouldReuseCapture,
   missLimit,
   isCurrentWordRequest,

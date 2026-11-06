@@ -5,7 +5,10 @@ const os = require('node:os');
 const path = require('node:path');
 
 const DEFAULT_BASE_URL = 'https://api.deepseek.com';
-const MODELS = ['deepseek-flash', 'deepseek-v4-pro'];
+// Official DeepSeek API model names. These are presets only: proxy users may
+// type any non-empty custom model name.
+const MODELS = ['deepseek-chat', 'deepseek-reasoner'];
+const MAX_MODEL_LENGTH = 100;
 const PROVIDERS = ['local', 'deepSeek'];
 
 class SettingsError extends Error {
@@ -40,6 +43,12 @@ function normalizeBaseURL(value) {
   const url = validatedBaseURL(value);
   if (!url) return null;
   return `${url.origin}${url.pathname}`.replace(/\/+$/, '');
+}
+
+function normalizeModel(value) {
+  const trimmed = String(value ?? '').trim();
+  if (!trimmed || trimmed.length > MAX_MODEL_LENGTH) return null;
+  return trimmed;
 }
 
 function createSettingsStore(options = {}) {
@@ -95,7 +104,10 @@ function createSettingsStore(options = {}) {
         if (PROVIDERS.includes(stored.provider)) state.provider = stored.provider;
         const base = normalizeBaseURL(stored.baseURL);
         if (base) state.baseURL = base;
-        if (MODELS.includes(stored.model)) state.model = stored.model;
+        // Preserve any previously saved model, including unofficial proxy
+        // names; only reject empty/oversized values.
+        const storedModel = normalizeModel(stored.model);
+        if (storedModel) state.model = storedModel;
       }
     } catch (error) {
       console.error('EASYLENS_SETTINGS_READ_ERROR', error.message);
@@ -134,8 +146,9 @@ function createSettingsStore(options = {}) {
     if (!normalizedBaseURL) {
       throw new SettingsError('invalid-url', '接口地址需为有效的 HTTPS 地址。');
     }
-    if (!MODELS.includes(model)) {
-      throw new SettingsError('invalid-model', '请选择可用的 DeepSeek 模型。');
+    const normalizedModel = normalizeModel(model);
+    if (!normalizedModel) {
+      throw new SettingsError('invalid-model', '请填写 DeepSeek 模型名称。');
     }
     const key = String(newAPIKey ?? '').trim();
     if (key) storeAPIKey(key);
@@ -143,7 +156,7 @@ function createSettingsStore(options = {}) {
     if (provider === 'deepSeek' && !available) {
       throw new SettingsError('missing-key', '请先保存 DeepSeek API Key。');
     }
-    state = { provider, baseURL: normalizedBaseURL, model };
+    state = { provider, baseURL: normalizedBaseURL, model: normalizedModel };
     persist();
     return getPublic();
   }
@@ -187,9 +200,11 @@ function createSettingsStore(options = {}) {
 module.exports = {
   DEFAULT_BASE_URL,
   MODELS,
+  MAX_MODEL_LENGTH,
   PROVIDERS,
   SettingsError,
   validatedBaseURL,
   normalizeBaseURL,
+  normalizeModel,
   createSettingsStore
 };

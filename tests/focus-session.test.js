@@ -6,6 +6,9 @@ const {
   classifyPointerMove,
   shouldResetFocus,
   captureHidesLens,
+  shouldSuppressLensForCapture,
+  markInspectionComplete,
+  shouldCancelPendingWord,
   shouldReuseCapture,
   missLimit,
   acceptWordResult,
@@ -134,4 +137,78 @@ test('only Linux needs to hide the real lens window during capture', () => {
   assert.equal(captureHidesLens('linux'), true);
   assert.equal(captureHidesLens('darwin'), false);
   assert.equal(captureHidesLens('win32'), false);
+});
+
+test('only Linux suppresses lens paint around a capture', () => {
+  assert.equal(shouldSuppressLensForCapture('linux'), true);
+  assert.equal(shouldSuppressLensForCapture('darwin'), false);
+  assert.equal(shouldSuppressLensForCapture('win32'), false);
+});
+
+test('a completed hit, miss, error or reuse scan does not schedule another capture', () => {
+  for (const generation of [1, 7, 42]) {
+    const state = { generation, inspectedGeneration: -1, nextInspectionAt: 0 };
+    markInspectionComplete(state);
+    assert.equal(state.inspectedGeneration, state.generation);
+    assert.equal(state.inspectedGeneration !== state.generation, false,
+      'tick must not inspect the same stationary spot again');
+  }
+
+  const state = { generation: 9, inspectedGeneration: -1, nextInspectionAt: 0 };
+  markInspectionComplete(state);
+  assert.equal(state.inspectedGeneration, state.generation);
+
+  // A stationary pointer keeps the completed scan closed.
+  assert.equal(classifyPointerMove(0), 'stationary');
+  assert.equal(classifyPointerMove(2.9), 'stationary');
+  assert.equal(state.inspectedGeneration, state.generation);
+
+  // Any real move (>=3px) reopens inspection; only >=16px breaks the focus.
+  assert.equal(classifyPointerMove(3), 'micro-move');
+  state.inspectedGeneration = -1;
+  assert.equal(state.inspectedGeneration !== state.generation, true);
+  assert.equal(shouldResetFocus(15.9), false);
+  assert.equal(shouldResetFocus(16), true);
+});
+
+test('sentence jitter keeps a pending DeepSeek word request alive', () => {
+  assert.equal(shouldCancelPendingWord({
+    currentAnchor: 'meeting',
+    nextAnchor: 'meeting',
+    distance: 0
+  }), false);
+  assert.equal(shouldCancelPendingWord({
+    currentAnchor: 'meeting',
+    nextAnchor: 'meeting',
+    distance: 15.9
+  }), false);
+  assert.equal(shouldCancelPendingWord({
+    currentAnchor: 'meeting',
+    nextAnchor: 'meeting',
+    distance: 16
+  }), true);
+  assert.equal(shouldCancelPendingWord({
+    currentAnchor: 'meeting',
+    nextAnchor: 'calendar',
+    distance: 0
+  }), true);
+  assert.equal(shouldCancelPendingWord({
+    currentAnchor: null,
+    nextAnchor: 'meeting',
+    distance: 0
+  }), true);
+});
+
+test('a stale successful word result still lands in the cache', () => {
+  const outcome = acceptWordResult({
+    cache: new Map(),
+    visible: true,
+    pendingKey: null,
+    key: wordKey,
+    currentAnchor: 'calendar',
+    anchor: 'meeting',
+    result
+  });
+  assert.equal(outcome.display, false);
+  assert.deepEqual(outcome.cache.get(wordKey), result);
 });

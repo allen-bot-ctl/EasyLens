@@ -28,6 +28,9 @@ const {
   classifyPointerMove,
   shouldResetFocus,
   captureHidesLens,
+  shouldSuppressLensForCapture,
+  markInspectionComplete,
+  shouldCancelPendingWord,
   shouldReuseCapture,
   missLimit,
   isCurrentWordRequest,
@@ -81,6 +84,7 @@ const state = {
   visible: false,
   pointer: { x: 0, y: 0 },
   lastMoveAt: 0,
+  lastMoveDistance: 0,
   generation: 0,
   inspectedGeneration: -1,
   nextInspectionAt: 0,
@@ -346,6 +350,9 @@ function showLens() {
   const frame = lensFrame(pointer);
   lensWindow.setBounds({ x: frame.x, y: frame.y, width: LENS_WIDTH, height: LENS_HEIGHT });
   lensWindow.showInactive();
+  lensWindow.setAlwaysOnTop(true, 'screen-saver');
+  lensWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  lensWindow.moveTop();
   // The renderer treats a false suppression value as a wake signal and
   // re-arms its animation loop immediately. The explicit resume event also
   // covers macOS when WindowServer briefly detaches the transparent window.
@@ -429,6 +436,7 @@ function tick() {
   const distance = Math.hypot(pointer.x - state.pointer.x, pointer.y - state.pointer.y);
   const movement = classifyPointerMove(distance);
   state.pointer = pointer;
+  state.lastMoveDistance = distance;
   if (movement !== 'stationary') {
     state.lastMoveAt = now;
     // Re-inspect after the pointer settles, but do not burn a new generation
@@ -533,17 +541,19 @@ async function captureAroundCursor(pointer) {
   if (cardWindow && !cardWindow.isDestroyed()) cardWindow.hide();
   // The eye sits exactly over the word being read. On Linux a transparent
   // always-on-top window still occludes the root-window capture, so hide the
-  // real window briefly while taking the frame. On macOS/Windows hiding and
-  // re-showing makes WindowServer rebuild the transparent window layer, which
-  // is the source of the violent eye flicker; there we only suppress painting.
+  // real window briefly while taking the frame. On macOS/Windows hiding or
+  // dimming the window makes WindowServer rebuild the transparent layer and
+  // causes the visible eye flicker; the lens already has a transparent hole
+  // over the word, so those platforms capture without any opacity dance.
   const restoreLens = state.visible && lensWindow && !lensWindow.isDestroyed();
   const hideRealWindow = captureHidesLens(process.platform);
-  if (restoreLens) {
+  const suppressForCapture = shouldSuppressLensForCapture(process.platform);
+  if (restoreLens && suppressForCapture) {
     if (hideRealWindow) lensWindow.hide();
     suppressLens(true);
-    // Give the compositor a moment to apply opacity 0 (or the Linux hide)
-    // before asking desktopCapturer for the root frame.
-    await delay(hideRealWindow ? 45 : 30);
+    // Give the compositor a moment to apply the Linux hide before asking
+    // desktopCapturer for the root frame.
+    await delay(45);
   }
 
   let thumbnail;
@@ -564,10 +574,10 @@ async function captureAroundCursor(pointer) {
       if (hideRealWindow) {
         updateLensPosition(pointer);
         lensWindow.showInactive();
+        // Sent after showInactive so it both restores opacity and wakes the
+        // renderer loop after the Linux capture hide.
+        resumeLensRenderer();
       }
-      // Send this after showInactive so it both restores opacity and wakes the
-      // renderer loop even if the window was hidden for the capture.
-      resumeLensRenderer();
     } else {
       // Keep the renderer's suppression state clean for the next show.
       suppressLens(false);
@@ -619,8 +629,8 @@ async function inspectFocus() {
     lastCaptureAnchor: state.lastCaptureAnchor
   })) {
     // Same spot, same anchor: avoid another capture during trackpad jitter.
-    state.inspectedGeneration = -1;
-    state.nextInspectionAt = now + 0.4;
+    // The spot is already inspected; only a real pointer move may reopen it.
+    markInspectionComplete(state);
     return;
   }
   state.scanning = true;
@@ -664,8 +674,9 @@ async function inspectFocus() {
   } catch (error) {
     log('FOCUS_SCAN_ERROR=' + (error?.message || error));
     if (state.visible && generation === state.generation) {
-      state.inspectedGeneration = -1;
-      state.nextInspectionAt = uptime() + 0.8;
+      // A finished error still counts as having scanned this position: wait
+      // for a new pointer move rather than retrying the same spot.
+      markInspectionComplete(state);
     }
   } finally {
     state.scanning = false;
@@ -690,16 +701,22 @@ function handleMiss() {
     hideCard();
     log('FOCUS_CONTENT_CHANGED target=none');
   }
-  state.inspectedGeneration = -1;
-  state.nextInspectionAt = uptime() +
-    Math.min(0.45 * Math.pow(1.6, Math.max(0, state.misses - 1)), 2.0);
+  // A miss is a completed scan too. Do not schedule a recapture loop on blank
+  // text; tick() only inspects again after a real pointer move.
+  markInspectionComplete(state);
   log('SENTENCE_FOCUS none');
 }
 
 function translateWordFocus(passage, pointer) {
   const settings = settingsStore.getPublic();
-  const resetTranslation = state.currentAnchor !== passage.anchor ||
-    state.currentSentence !== passage.sentence;
+  // Sentence punctuation can jitter between OCR frames. Keep an in-flight
+  // DeepSeek request alive as long as the anchor is unchanged and the pointer
+  // has not made a real focus-break move.
+  const resetTranslation = shouldCancelPendingWord({
+    currentAnchor: state.currentAnchor,
+    nextAnchor: passage.anchor,
+    distance: state.lastMoveDistance
+  });
   if (resetTranslation) {
     finishRemoteLoading();
     hideCard();
@@ -710,10 +727,8 @@ function translateWordFocus(passage, pointer) {
   }
   state.currentAnchor = passage.anchor;
   state.currentSentence = passage.sentence;
-  state.inspectedGeneration = -1;
-  // Recheck a stationary passage less often: the Linux capture path briefly
-  // hides the eye window so it does not occlude the screen frame.
-  state.nextInspectionAt = uptime() + 2.0;
+  // A hit is a completed scan of this spot. Only a new pointer move reopens it.
+  markInspectionComplete(state);
 
   const key = passage.anchor.toLowerCase() + '\n' + passage.sentence;
   if (settings.provider === 'local') {
@@ -747,7 +762,13 @@ function translateWordFocus(passage, pointer) {
     log('FOCUS_TRANSLATION cacheHit=true provider=' + settings.provider);
     return;
   }
-  if (state.pendingWordKey === key) return;
+  // An in-flight request for the same anchor stays authoritative even if OCR
+  // retyped the surrounding sentence. Do not replace its pending key.
+  const pendingAnchor = state.pendingWordKey
+    ? state.pendingWordKey.split('\n', 1)[0]
+    : null;
+  if (state.pendingWordKey === key ||
+      pendingAnchor === passage.anchor.toLowerCase()) return;
   state.pendingWordKey = key;
 
   if (settings.provider === 'deepSeek') {
@@ -870,13 +891,14 @@ function translateSelection(text, pointer) {
     return;
   }
   if (state.pendingSelectionText === text) {
-    state.nextInspectionAt = uptime() + 2.0;
+    markInspectionComplete(state);
     return;
   }
   const requestId = ++state.selectionRequestId;
   state.pendingSelectionText = text;
-  state.inspectedGeneration = -1;
-  state.nextInspectionAt = uptime() + 2.0;
+  // A selection hit is a completed scan of this spot; stop recapturing until
+  // the pointer makes a real move.
+  markInspectionComplete(state);
   hideCard();
   log(`SELECTION_TRANSLATION requested length=${text.length} provider=${settings.provider}`);
 
@@ -1126,10 +1148,22 @@ async function bootstrap() {
   createCardWindow();
   createTray();
 
-  const registered = globalShortcut.register('Control+Alt+L', toggleLens);
-  log(registered
-    ? 'WAKE_HOTKEY_REGISTERED=Control+Alt+L'
-    : 'ERROR wake hotkey unavailable: Control+Alt+L');
+  // On macOS Option is also called Alt. Register both spellings so users can
+  // use either; if Electron resolves them to the same accelerator the second
+  // registration fails and the first remains active.
+  const wakeAccelerators = process.platform === 'darwin'
+    ? ['Control+Alt+L', 'Control+Option+L']
+    : ['Control+Alt+L'];
+  for (const accelerator of wakeAccelerators) {
+    try {
+      const registered = globalShortcut.register(accelerator, toggleLens);
+      log(registered
+        ? `WAKE_HOTKEY_REGISTERED=${accelerator}`
+        : `ERROR wake hotkey unavailable: ${accelerator}`);
+    } catch (error) {
+      log(`ERROR wake hotkey ${accelerator}`, error.message);
+    }
+  }
   log('EASYLENS_READY platform=' + process.platform + ' electron=' + process.versions.electron);
   log('TRANSLATION_PROVIDER=' + settingsStore.getPublic().provider + ' screenshots_saved=0');
 

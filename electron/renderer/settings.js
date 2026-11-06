@@ -60,7 +60,7 @@ form.addEventListener('submit', async (event) => {
     const result = await window.easylens.settings.save({
       provider: provider.value,
       baseURL: baseURL.value,
-      model: model.value,
+      model: model.value.trim(),
       newAPIKey: apiKey.value
     });
     if (!result.ok) {

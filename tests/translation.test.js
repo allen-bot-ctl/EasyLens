@@ -120,7 +120,7 @@ test('API key is stored outside settings.json with restricted permissions', () =
     const saved = store.save({
       provider: 'deepSeek',
       baseURL: 'https://api.deepseek.com',
-      model: 'deepseek-flash',
+      model: 'deepseek-chat',
       newAPIKey: '  sk-test-123  \n'
     });
     assert.equal(saved.hasAPIKey, true);
@@ -154,15 +154,48 @@ test('settings reject non-HTTPS and missing keys', () => {
     assert.throws(() => store.save({
       provider: 'local',
       baseURL: 'http://example.com',
-      model: 'deepseek-flash',
+      model: 'deepseek-chat',
       newAPIKey: ''
     }), /HTTPS/);
     assert.throws(() => store.save({
       provider: 'deepSeek',
       baseURL: 'https://api.deepseek.com',
-      model: 'deepseek-flash',
+      model: 'deepseek-chat',
       newAPIKey: ''
     }), /API Key/);
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test('settings default to official models and accept custom proxy names', () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'easylens-settings-'));
+  try {
+    const store = createSettingsStore({ rootDir: scratch });
+    const defaults = store.load();
+    assert.equal(defaults.model, 'deepseek-chat');
+    assert.deepEqual(defaults.models, ['deepseek-chat', 'deepseek-reasoner']);
+
+    const saved = store.save({
+      provider: 'local',
+      baseURL: 'https://api.deepseek.com',
+      model: '  my-proxy-model  ',
+      newAPIKey: ''
+    });
+    assert.equal(saved.model, 'my-proxy-model');
+
+    const reloaded = createSettingsStore({ rootDir: scratch });
+    reloaded.load();
+    assert.equal(reloaded.getPublic().model, 'my-proxy-model');
+    assert.equal(JSON.parse(fs.readFileSync(reloaded.settingsFile, 'utf8')).model,
+      'my-proxy-model');
+
+    assert.throws(() => store.save({
+      provider: 'local',
+      baseURL: 'https://api.deepseek.com',
+      model: '   ',
+      newAPIKey: ''
+    }), /模型/);
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
   }

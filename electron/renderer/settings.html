@@ -140,10 +140,13 @@
 
       <div class="field">
         <label for="model">DeepSeek 模型</label>
-        <select id="model">
-          <option value="deepseek-flash">deepseek-flash · V4.1 Flash</option>
-          <option value="deepseek-v4-pro">deepseek-v4-pro · V4 Pro</option>
-        </select>
+        <input id="model" type="text" list="modelPresets" spellcheck="false"
+          placeholder="deepseek-chat" autocomplete="off">
+        <datalist id="modelPresets">
+          <option value="deepseek-chat">deepseek-chat · 官方默认</option>
+          <option value="deepseek-reasoner">deepseek-reasoner · 官方推理模型</option>
+        </datalist>
+        <div class="note">官方模型为 deepseek-chat（默认）和 deepseek-reasoner；使用代理时可填写自定义模型名。</div>
       </div>
 
       <div class="field">
