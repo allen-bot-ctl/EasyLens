@@ -8,6 +8,7 @@ const apiKey = document.getElementById('apiKey');
 const keyStatus = document.getElementById('keyStatus');
 const removeKey = document.getElementById('removeKey');
 const testButton = document.getElementById('test');
+const openLogButton = document.getElementById('openLog');
 const closeButton = document.getElementById('close');
 const saveButton = document.getElementById('save');
 const message = document.getElementById('message');
@@ -91,6 +92,15 @@ testButton.addEventListener('click', async () => {
     setMessage(`连接失败：${error.message}`, 'error');
   } finally {
     setTesting(false);
+  }
+});
+
+openLogButton.addEventListener('click', async () => {
+  try {
+    const result = await window.easylens.settings.openLog();
+    if (result && result.path) setMessage(`日志位置：${result.path}`, 'success');
+  } catch (error) {
+    setMessage(`无法打开运行日志：${error.message}`, 'error');
   }
 });
 

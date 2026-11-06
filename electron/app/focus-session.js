@@ -8,12 +8,25 @@ const POINTER_MOVE_PX = 3;
 const FOCUS_BREAK_PX = 16;
 const CAPTURE_MIN_INTERVAL_SECONDS = 0.4;
 const CAPTURE_SAME_SPOT_PX = 8;
+const CAPTURE_RETRY_SECONDS = 0.8;
 const MISS_LIMIT_IDLE = 2;
 const MISS_LIMIT_PENDING = 4;
+
+const SCREEN_PERMISSION_TITLE = '需要屏幕录制权限';
+const SCREEN_PERMISSION_TEXT = '请在系统设置中允许 EasyLens 录屏，以便识别光标下的英文单词。';
+
+function distanceFrom(a, b) {
+  if (!a || !b) return Infinity;
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
 
 function classifyPointerMove(distance) {
   if (!Number.isFinite(distance) || distance < POINTER_MOVE_PX) return 'stationary';
   return distance >= FOCUS_BREAK_PX ? 'focus-change' : 'micro-move';
+}
+
+function shouldReopenInspection(distanceFromLastScan) {
+  return Number.isFinite(distanceFromLastScan) && distanceFromLastScan >= POINTER_MOVE_PX;
 }
 
 function shouldResetFocus(distance) {
@@ -34,14 +47,38 @@ function shouldSuppressLensForCapture(platform) {
   return platform === 'linux';
 }
 
-// The current pointer position has been scanned (hit, miss, error or reuse).
-// Keeping inspectedGeneration equal to generation is the invariant that stops
-// tick() from recapturing the same stationary spot. Only a real pointer move
-// can reset it and reopen inspection.
-function markInspectionComplete(state) {
+// The current pointer position has been scanned successfully (hit, OCR miss or
+// reuse). Keeping inspectedGeneration equal to generation is the invariant that
+// stops tick() from recapturing the same stationary spot. The scan anchor also
+// moves forward so the next 3px is measured from the last inspected spot.
+function markInspectionComplete(state, pointer) {
   if (!state) return state;
   state.inspectedGeneration = state.generation;
+  if (pointer && Number.isFinite(pointer.x) && Number.isFinite(pointer.y)) {
+    state.lastInspectedPointer = { x: pointer.x, y: pointer.y };
+  }
   return state;
+}
+
+// A failed capture is not a successful scan. Reopen the same spot and retry
+// shortly, without advancing lastInspectedPointer. Clearing the reuse stamps
+// also ensures shouldReuseCapture cannot swallow the retry.
+function scheduleCaptureRetry(state, now) {
+  if (!state) return state;
+  state.inspectedGeneration = -1;
+  state.nextInspectionAt = Number.isFinite(now) ? now + CAPTURE_RETRY_SECONDS : 0;
+  state.lastCaptureAt = 0;
+  state.lastCapturePointer = null;
+  state.lastCaptureAnchor = null;
+  return state;
+}
+
+function screenPermissionCard() {
+  return {
+    kind: 'word',
+    title: SCREEN_PERMISSION_TITLE,
+    text: SCREEN_PERMISSION_TEXT
+  };
 }
 
 // OCR sentence punctuation can jitter while the anchor stays the same. Keep
@@ -177,11 +214,18 @@ module.exports = {
   FOCUS_BREAK_PX,
   CAPTURE_MIN_INTERVAL_SECONDS,
   CAPTURE_SAME_SPOT_PX,
+  CAPTURE_RETRY_SECONDS,
+  SCREEN_PERMISSION_TITLE,
+  SCREEN_PERMISSION_TEXT,
+  distanceFrom,
   classifyPointerMove,
+  shouldReopenInspection,
   shouldResetFocus,
   captureHidesLens,
   shouldSuppressLensForCapture,
   markInspectionComplete,
+  scheduleCaptureRetry,
+  screenPermissionCard,
   shouldCancelPendingWord,
   shouldReuseCapture,
   missLimit,

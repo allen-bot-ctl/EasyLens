@@ -3,11 +3,16 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  POINTER_MOVE_PX,
+  distanceFrom,
   classifyPointerMove,
+  shouldReopenInspection,
   shouldResetFocus,
   captureHidesLens,
   shouldSuppressLensForCapture,
   markInspectionComplete,
+  scheduleCaptureRetry,
+  screenPermissionCard,
   shouldCancelPendingWord,
   shouldReuseCapture,
   missLimit,
@@ -211,4 +216,75 @@ test('a stale successful word result still lands in the cache', () => {
   });
   assert.equal(outcome.display, false);
   assert.deepEqual(outcome.cache.get(wordKey), result);
+});
+
+test('slow accumulated movement reopens inspection from the last successful scan', () => {
+  assert.equal(POINTER_MOVE_PX, 3);
+  const lastInspectedPointer = { x: 100, y: 100 };
+
+  // Four ticks of a slow 1px move: the per-frame delta is always 1px, but the
+  // scan-anchor distance accumulates to 4px and must reopen.
+  const afterFourPixels = distanceFrom({ x: 104, y: 100 }, lastInspectedPointer);
+  assert.equal(afterFourPixels, 4);
+  assert.equal(shouldReopenInspection(afterFourPixels), true);
+
+  const belowThreshold = distanceFrom({ x: 102.9, y: 100 }, lastInspectedPointer);
+  assert.equal(shouldReopenInspection(belowThreshold), false);
+  assert.equal(shouldReopenInspection(2.9), false);
+  assert.equal(shouldReopenInspection(3), true);
+});
+
+test('marking a completed scan advances the scan anchor and generation', () => {
+  const state = {
+    generation: 12,
+    inspectedGeneration: -1,
+    lastInspectedPointer: { x: 10, y: 10 }
+  };
+  markInspectionComplete(state, { x: 44, y: 55 });
+  assert.equal(state.inspectedGeneration, 12);
+  assert.deepEqual(state.lastInspectedPointer, { x: 44, y: 55 });
+
+  // A capture failure must not move the anchor; the caller simply never calls
+  // markInspectionComplete with the failed scan pointer.
+  const failed = {
+    generation: 12,
+    inspectedGeneration: -1,
+    lastInspectedPointer: { x: 10, y: 10 }
+  };
+  scheduleCaptureRetry(failed, 20);
+  assert.deepEqual(failed.lastInspectedPointer, { x: 10, y: 10 });
+  assert.equal(failed.inspectedGeneration, -1);
+  assert.equal(failed.nextInspectionAt, 20.8);
+});
+
+test('capture failure retries in 800ms instead of completing the spot', () => {
+  const state = {
+    generation: 3,
+    inspectedGeneration: 3,
+    nextInspectionAt: 0,
+    lastCaptureAt: 9,
+    lastCapturePointer: { x: 5, y: 5 },
+    lastCaptureAnchor: 'meeting'
+  };
+  scheduleCaptureRetry(state, 10);
+  assert.equal(state.inspectedGeneration, -1,
+    'the same spot must be reopened without requiring a pointer move');
+  assert.equal(state.nextInspectionAt, 10.8);
+  assert.equal(state.lastCaptureAt, 0);
+  assert.equal(state.lastCapturePointer, null);
+  assert.equal(state.lastCaptureAnchor, null);
+
+  // In contrast, a successful OCR miss marks the generation complete and does
+  // not schedule a blank-text recapture loop.
+  const missed = { generation: 3, inspectedGeneration: -1, nextInspectionAt: 0 };
+  markInspectionComplete(missed, { x: 7, y: 8 });
+  assert.equal(missed.inspectedGeneration, 3);
+  assert.equal(missed.nextInspectionAt, 0);
+});
+
+test('screen permission card uses the visible word card shape', () => {
+  const card = screenPermissionCard();
+  assert.equal(card.kind, 'word');
+  assert.equal(card.title, '需要屏幕录制权限');
+  assert.equal(card.text, '请在系统设置中允许 EasyLens 录屏，以便识别光标下的英文单词。');
 });

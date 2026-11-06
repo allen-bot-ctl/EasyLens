@@ -2,7 +2,7 @@
 
 const {
   app, BrowserWindow, Tray, Menu, globalShortcut, screen, desktopCapturer,
-  ipcMain, nativeImage, clipboard, dialog
+  ipcMain, nativeImage, clipboard, dialog, shell, systemPreferences
 } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
@@ -13,6 +13,7 @@ const { promisify } = require('node:util');
 const execFileAsync = promisify(execFile);
 
 const { createSettingsStore } = require('./app/settings-store');
+const { createFileLogger } = require('./app/file-log');
 const { createOcrService, findFocus } = require('./app/ocr');
 const { translateWord: deepSeekWord, translateSelection: deepSeekSelection } = require('./app/deepseek');
 const localTranslator = require('./app/local-translator');
@@ -25,11 +26,14 @@ const {
   relativeTimeChinese
 } = require('./app/focus-text');
 const {
+  distanceFrom,
   classifyPointerMove,
   shouldResetFocus,
   captureHidesLens,
   shouldSuppressLensForCapture,
   markInspectionComplete,
+  scheduleCaptureRetry,
+  screenPermissionCard,
   shouldCancelPendingWord,
   shouldReuseCapture,
   missLimit,
@@ -108,11 +112,52 @@ const state = {
   lastCaptureAt: 0,
   lastCapturePointer: null,
   lastCaptureAnchor: null,
+  lastInspectedPointer: null,
   lastDiagnostic: ''
 };
 
+const fileLogger = createFileLogger();
 function log(...values) {
-  console.log(...values);
+  fileLogger.info(...values);
+}
+log.warn = (...values) => fileLogger.warn(...values);
+log.error = (...values) => fileLogger.error(...values);
+
+function screenAccessStatus() {
+  if (process.platform !== 'darwin') return 'granted';
+  try {
+    return systemPreferences.getMediaAccessStatus('screen');
+  } catch {
+    return 'unknown';
+  }
+}
+
+async function openScreenPermissionSettings() {
+  if (process.platform !== 'darwin') return;
+  try {
+    await shell.openExternal(
+      'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'
+    );
+  } catch (error) {
+    log.error('SCREEN_PERMISSION_OPEN_ERROR=' + (error?.message || error));
+  }
+  updateTrayMenu();
+}
+
+async function openLogLocation() {
+  fileLogger.touch();
+  try {
+    const error = await shell.openPath(fileLogger.logFile);
+    if (!error) return;
+  } catch (error) {
+    log.warn('LOG_OPEN_ERROR=' + (error?.message || error));
+  }
+  try {
+    const error = await shell.openPath(fileLogger.logDir);
+    if (error) log.warn('LOG_DIR_OPEN_ERROR=' + error);
+  } catch (error) {
+    log.warn('LOG_DIR_OPEN_ERROR=' + (error?.message || error));
+  }
 }
 
 function preloadPath() {
@@ -285,6 +330,9 @@ function showCard(payload) {
   cardWindow.webContents.send('card:show', payload);
   positionCard();
   cardWindow.showInactive();
+  cardWindow.setAlwaysOnTop(true, 'screen-saver');
+  cardWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  cardWindow.moveTop();
   if (payload.kind !== 'loading') {
     sendLens({ translated: true, reading: false });
   } else {
@@ -340,6 +388,7 @@ function showLens() {
   if (!lensWindow || lensWindow.isDestroyed()) return;
   const pointer = pointerPosition();
   state.pointer = pointer;
+  state.lastInspectedPointer = { x: pointer.x, y: pointer.y };
   state.visible = true;
   state.lastMoveAt = uptime();
   state.generation += 1;
@@ -433,7 +482,12 @@ function tick() {
   pollClipboard();
   updateLensPosition(pointer);
   const now = uptime();
-  const distance = Math.hypot(pointer.x - state.pointer.x, pointer.y - state.pointer.y);
+  if (!state.lastInspectedPointer) {
+    state.lastInspectedPointer = { x: pointer.x, y: pointer.y };
+  }
+  // Measure from the last successfully inspected spot, not from the previous
+  // 16ms frame. Slow steady moves accumulate 3px and must reopen inspection.
+  const distance = distanceFrom(pointer, state.lastInspectedPointer);
   const movement = classifyPointerMove(distance);
   state.pointer = pointer;
   state.lastMoveDistance = distance;
@@ -630,22 +684,34 @@ async function inspectFocus() {
   })) {
     // Same spot, same anchor: avoid another capture during trackpad jitter.
     // The spot is already inspected; only a real pointer move may reopen it.
-    markInspectionComplete(state);
+    markInspectionComplete(state, state.pointer);
     return;
   }
   state.scanning = true;
   const generation = state.generation;
+  const pointer = { x: state.pointer.x, y: state.pointer.y };
   state.inspectedGeneration = generation;
   sendLens({ reading: true, translated: false });
+  let captureSucceeded = false;
   try {
-    const pointer = state.pointer;
-    state.lastCaptureAt = now;
-    state.lastCapturePointer = { x: pointer.x, y: pointer.y };
-    state.lastCaptureAnchor = state.currentAnchor;
+    const accessStatus = screenAccessStatus();
+    if (process.platform === 'darwin' && accessStatus !== 'granted') {
+      log.error(`SCREEN_PERMISSION_UNAVAILABLE status=${accessStatus} pointer=${pointer.x},${pointer.y}`);
+      showCard(screenPermissionCard());
+      updateTrayMenu();
+      markInspectionComplete(state, pointer);
+      return;
+    }
     const [shot, hint] = await Promise.all([
       captureAroundCursor(pointer),
       currentSelectionHint()
     ]);
+    captureSucceeded = true;
+    // Only a successful capture may feed the reuse gate. Stamping these before
+    // getSources lets a permission failure block its own 800ms retry.
+    state.lastCaptureAt = now;
+    state.lastCapturePointer = { x: pointer.x, y: pointer.y };
+    state.lastCaptureAnchor = state.currentAnchor;
     const words = await ocrService.recognize(shot.image);
     if (process.env.EASYLENS_DEBUG_OCR === '1') {
       log('OCR_WORDS=' + words.map((word) => word.text).join(' | '));
@@ -658,7 +724,7 @@ async function inspectFocus() {
       hint?.text || null
     );
     if (!passage) {
-      handleMiss();
+      handleMiss(pointer);
       return;
     }
     state.misses = 0;
@@ -672,11 +738,25 @@ async function inspectFocus() {
     }
     log(`SENTENCE_FOCUS anchor=${passage.anchor} sentenceLength=${passage.sentence.length} distance=${passage.distance.toFixed(3)} confidence=${passage.confidence}`);
   } catch (error) {
-    log('FOCUS_SCAN_ERROR=' + (error?.message || error));
-    if (state.visible && generation === state.generation) {
-      // A finished error still counts as having scanned this position: wait
-      // for a new pointer move rather than retrying the same spot.
-      markInspectionComplete(state);
+    const message = error?.message || String(error);
+    const accessStatus = screenAccessStatus();
+    if (captureSucceeded) {
+      // OCR/runtime failure after a real capture: behave like a completed
+      // scan, not like a retry loop (blank-text recapture caused 0.1.4 flicker).
+      log.error(`FOCUS_SCAN_ERROR=${message} stage=ocr mediaAccess=${accessStatus}`);
+      if (state.visible && generation === state.generation) {
+        markInspectionComplete(state, pointer);
+      }
+    } else {
+      // A permission failure used to reach markInspectionComplete and stop
+      // scanning this spot forever. Show the permission card and retry after
+      // 800ms without advancing the last inspected pointer.
+      log.error(`CAPTURE_ERROR=${message} mediaAccess=${accessStatus} platform=${process.platform}`);
+      if (state.visible && generation === state.generation) {
+        showCard(screenPermissionCard());
+        scheduleCaptureRetry(state, uptime());
+        updateTrayMenu();
+      }
     }
   } finally {
     state.scanning = false;
@@ -684,7 +764,7 @@ async function inspectFocus() {
   }
 }
 
-function handleMiss() {
+function handleMiss(pointer) {
   state.misses += 1;
   const pendingRemote = Boolean(state.pendingWordKey || state.pendingSelectionText);
   // OCR can miss a frame under the eye. Do not kill an in-flight DeepSeek
@@ -703,7 +783,7 @@ function handleMiss() {
   }
   // A miss is a completed scan too. Do not schedule a recapture loop on blank
   // text; tick() only inspects again after a real pointer move.
-  markInspectionComplete(state);
+  markInspectionComplete(state, pointer);
   log('SENTENCE_FOCUS none');
 }
 
@@ -728,7 +808,7 @@ function translateWordFocus(passage, pointer) {
   state.currentAnchor = passage.anchor;
   state.currentSentence = passage.sentence;
   // A hit is a completed scan of this spot. Only a new pointer move reopens it.
-  markInspectionComplete(state);
+  markInspectionComplete(state, pointer);
 
   const key = passage.anchor.toLowerCase() + '\n' + passage.sentence;
   if (settings.provider === 'local') {
@@ -887,18 +967,19 @@ function translateSelection(text, pointer) {
       state.pendingSelectionText = null;
       if (state.remoteLoading?.type === 'selection') finishRemoteLoading();
     }
+    markInspectionComplete(state, pointer);
     showCard({ kind: 'selection', title: '选区翻译', text: cached });
     return;
   }
   if (state.pendingSelectionText === text) {
-    markInspectionComplete(state);
+    markInspectionComplete(state, pointer);
     return;
   }
   const requestId = ++state.selectionRequestId;
   state.pendingSelectionText = text;
   // A selection hit is a completed scan of this spot; stop recapturing until
   // the pointer makes a real move.
-  markInspectionComplete(state);
+  markInspectionComplete(state, pointer);
   hideCard();
   log(`SELECTION_TRANSLATION requested length=${text.length} provider=${settings.provider}`);
 
@@ -993,16 +1074,33 @@ function updateTrayMenu() {
   if (!tray) return;
   const settings = settingsStore ? settingsStore.getPublic() : { provider: 'local' };
   const wakeShortcut = process.platform === 'darwin' ? '⌃⌥L' : 'Ctrl+Alt+L';
-  const menu = Menu.buildFromTemplate([
+  const template = [
     {
       label: state.visible ? '隐藏眼睛 (Esc)' : `显示眼睛 (${wakeShortcut})`,
       click: toggleLens
     },
-    { type: 'separator' },
+    { type: 'separator' }
+  ];
+  if (process.platform === 'darwin') {
+    if (screenAccessStatus() === 'granted') {
+      template.push({ label: '屏幕录制：已授权', enabled: false });
+    } else {
+      template.push({
+        label: '屏幕录制：未授权 (点击授权)',
+        click: openScreenPermissionSettings
+      });
+    }
+    template.push({ type: 'separator' });
+  }
+  template.push(
     {
       label: '设置…',
       accelerator: 'CommandOrControl+,',
       click: showSettings
+    },
+    {
+      label: '查看运行日志…',
+      click: openLogLocation
     },
     { type: 'separator' },
     {
@@ -1037,7 +1135,8 @@ function updateTrayMenu() {
       accelerator: 'CommandOrControl+Q',
       click: () => app.quit()
     }
-  ]);
+  );
+  const menu = Menu.buildFromTemplate(template);
   tray.setContextMenu(menu);
   tray.setToolTip(state.visible ? 'EasyLens · 眼睛已显示' : 'EasyLens');
 }
@@ -1100,6 +1199,11 @@ function registerIpc() {
     } catch (error) {
       return { ok: false, error: error.message, code: error.code };
     }
+  });
+
+  ipcMain.handle('settings:open-log', async () => {
+    await openLogLocation();
+    return { ok: true, path: fileLogger.logFile };
   });
 
   ipcMain.handle('settings:close', () => {
@@ -1190,7 +1294,7 @@ if (!lock) {
   });
 
   app.whenReady().then(bootstrap).catch((error) => {
-    console.error('EASYLENS_START_ERROR', error);
+    log.error('EASYLENS_START_ERROR', error);
     app.quit();
   });
 
@@ -1214,8 +1318,8 @@ if (!lock) {
 }
 
 process.on('uncaughtException', (error) => {
-  console.error('EASYLENS_UNCAUGHT', error);
+  log.error('EASYLENS_UNCAUGHT', error);
 });
 process.on('unhandledRejection', (error) => {
-  console.error('EASYLENS_UNHANDLED_REJECTION', error);
+  log.error('EASYLENS_UNHANDLED_REJECTION', error);
 });

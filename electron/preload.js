@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('easylens', {
     save: (payload) => ipcRenderer.invoke('settings:save', payload),
     removeKey: () => ipcRenderer.invoke('settings:remove-key'),
     test: () => ipcRenderer.invoke('settings:test'),
+    openLog: () => ipcRenderer.invoke('settings:open-log'),
     close: () => ipcRenderer.invoke('settings:close')
   }
 });

@@ -75,6 +75,7 @@ npx electron-builder --mac dmg zip --x64 --arm64 --publish never
 - 托盘菜单的「设置…」可选择本地词典或 DeepSeek，填写 HTTPS 接口地址、模型和 API Key，并可测试连接。
 - DeepSeek API Key 保存在 `~/.easylens/deepseek-api-key`（目录 `0700`、文件 `0600`）；非敏感设置保存在 `~/.easylens/settings.json`。密钥不会写入仓库。
 - 选择 DeepSeek 时，待译文字会发送到配置的 HTTPS 接口；截图不会上传。
+- 运行日志写入 `~/.easylens/easylens.log`（超过约 5MB 自动轮换为 `easylens.log.1`）；托盘菜单和设置窗口的「查看运行日志…」可直接打开。
 
 ## Electron 版本的能力差距（以 Linux 为主要验证环境）
 
@@ -87,7 +88,7 @@ Windows x64 与 macOS 安装包由 CI 构建，但本仓库尚未在这些系统
 | Accessibility 读取任意应用选区与命中几何 | 读取 X11/Wayland PRIMARY（Electron `clipboard` 的 `selection` 类型，必要时回退到 `wl-paste`、`xclip`、`xsel`）或近期剪贴板提示；没有精确 AX 命中几何，可能把陈旧选区误判为当前选区。 |
 | macOS Translation 本地英译中 | 无系统翻译框架。单词使用内置词典；长选区只能逐词释义，质量明显低于真正的机器翻译；需要完整译文时请配置 DeepSeek。 |
 | 菜单栏 `LSUIElement` | 托盘应用 + `skipTaskbar`；主要 Linux 桌面可能需要 AppIndicator 扩展才能显示托盘图标。 |
-| 录屏/辅助功能 TCC 授权流程 | 不再需要 TCC；Wayland 下屏幕捕获由 PipeWire/portal 管理，首次可能弹系统授权。若捕获为黑屏，优先在 X11 会话运行。 |
+| 录屏/辅助功能 TCC 授权流程 | macOS 首次使用需在系统设置授予 EasyLens 屏幕录制权限，托盘菜单和翻译卡会提示并可直接打开授权页；Wayland 下屏幕捕获由 PipeWire/portal 管理，首次可能弹系统授权。若捕获为黑屏，优先在 X11 会话运行。 |
 | 原生毛玻璃眼睛 | Canvas 绘制近似透明眼睛，中心保持透明；不依赖原生材质。 |
 
 ## 原 macOS 工程（参考）
