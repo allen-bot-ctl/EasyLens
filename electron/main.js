@@ -694,14 +694,11 @@ async function inspectFocus() {
   sendLens({ reading: true, translated: false });
   let captureSucceeded = false;
   try {
-    const accessStatus = screenAccessStatus();
-    if (process.platform === 'darwin' && accessStatus !== 'granted') {
-      log.error(`SCREEN_PERMISSION_UNAVAILABLE status=${accessStatus} pointer=${pointer.x},${pointer.y}`);
-      showCard(screenPermissionCard());
-      updateTrayMenu();
-      markInspectionComplete(state, pointer);
-      return;
-    }
+    // Never pre-check the screen permission to skip capture. macOS only shows
+    // the TCC prompt and adds the app to System Settings → Screen Recording
+    // after desktopCapturer.getSources actually tries to capture. A denied or
+    // unknown status falls through to the catch below, which shows the
+    // permission card and schedules the 800ms retry.
     const [shot, hint] = await Promise.all([
       captureAroundCursor(pointer),
       currentSelectionHint()
