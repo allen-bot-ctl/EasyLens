@@ -1,6 +1,6 @@
 {
   "name": "easylens",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "description": "EasyLens: a tray eye lens that translates English under the cursor into Chinese.",
   "homepage": "https://allen-bot-ctl.github.io/EasyLens/",
@@ -39,6 +39,7 @@
     },
     "files": [
       "electron/**/*",
+      "electron/bin/",
       "package.json"
     ],
     "asar": false,

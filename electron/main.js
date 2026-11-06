@@ -556,7 +556,56 @@ function pollClipboard() {
   }
 }
 
-async function readPrimarySelection() {
+function macosSelectionReaderPath() {
+  // main.js lives in electron/, and build.files keeps that layout even with
+  // asar disabled, so __dirname/bin/... is the authoritative location.
+  const candidates = [path.join(__dirname, 'bin', 'macos-selection-reader')];
+  if (process.resourcesPath) {
+    candidates.push(path.join(
+      process.resourcesPath, 'app', 'electron', 'bin', 'macos-selection-reader'));
+  }
+  for (const candidate of candidates) {
+    try {
+      if (fs.statSync(candidate).isFile()) return candidate;
+    } catch { /* keep probing the next layout */ }
+  }
+  return candidates[0];
+}
+
+let macosSelectionReaderMissingLogged = false;
+let macosSelectionReaderFailureLogged = false;
+
+async function readMacosPrimarySelection(pointer) {
+  if (!pointer || !Number.isFinite(pointer.x) || !Number.isFinite(pointer.y)) return null;
+  const binary = macosSelectionReaderPath();
+  try {
+    const { stdout } = await execFileAsync(
+      binary,
+      ['--point', String(pointer.x), String(pointer.y)],
+      { timeout: 350, maxBuffer: 64 * 1024, encoding: 'utf8' }
+    );
+    const text = typeof stdout === 'string' ? stdout.trim() : '';
+    return text || null;
+  } catch (error) {
+    // The reader exits non-zero when there is no selection or accessibility
+    // permission; that is the normal empty result, not a failure to log.
+    if (error?.code === 'ENOENT') {
+      if (!macosSelectionReaderMissingLogged) {
+        macosSelectionReaderMissingLogged = true;
+        log.error(`SELECTION_READER_MISSING path=${binary}`);
+      }
+    } else if (error?.killed || error?.signal) {
+      if (!macosSelectionReaderFailureLogged) {
+        macosSelectionReaderFailureLogged = true;
+        log.warn(`SELECTION_READER_FAILED path=${binary} error=${error?.message || error}`);
+      }
+    }
+    return null;
+  }
+}
+
+async function readPrimarySelection(pointer) {
+  if (process.platform === 'darwin') return readMacosPrimarySelection(pointer);
   if (process.platform !== 'linux') return null;
   // Electron can read the X11 PRIMARY selection directly. This works on
   // desktops that do not ship xclip/xsel, which are only fallbacks below.
@@ -582,8 +631,8 @@ async function readPrimarySelection() {
   return null;
 }
 
-async function currentSelectionHint() {
-  const primary = await readPrimarySelection();
+async function currentSelectionHint(pointer) {
+  const primary = await readPrimarySelection(pointer);
   if (primary) {
     const eligible = eligibleEnglishText(primary, 4000);
     if (eligible) return { text: eligible, source: 'primary' };
@@ -712,7 +761,7 @@ async function inspectFocus() {
     // permission card and schedules the 800ms retry.
     const [shot, hint] = await Promise.all([
       captureAroundCursor(pointer),
-      currentSelectionHint()
+      currentSelectionHint(pointer)
     ]);
     captureSucceeded = true;
     // Only a successful capture may feed the reuse gate. Stamping these before
