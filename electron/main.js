@@ -24,6 +24,18 @@ const {
   relativeTimeRegex,
   relativeTimeChinese
 } = require('./app/focus-text');
+const {
+  classifyPointerMove,
+  shouldResetFocus,
+  captureHidesLens,
+  shouldReuseCapture,
+  missLimit,
+  isCurrentWordRequest,
+  isCurrentSelectionRequest,
+  acceptWordResult,
+  acceptSelectionResult,
+  remoteErrorCard
+} = require('./app/focus-session');
 
 const LENS_WIDTH = 190;
 const LENS_HEIGHT = 114;
@@ -89,6 +101,9 @@ const state = {
   clipboardHintExpiresAt: 0,
   lastClipboardText: '',
   nextClipboardPollAt: 0,
+  lastCaptureAt: 0,
+  lastCapturePointer: null,
+  lastCaptureAnchor: null,
   lastDiagnostic: ''
 };
 
@@ -221,6 +236,19 @@ function suppressLens(suppress) {
   }
 }
 
+function sendLensResume() {
+  if (lensWindow && !lensWindow.isDestroyed()) {
+    lensWindow.webContents.send('lens:resume');
+  }
+}
+
+function resumeLensRenderer() {
+  // `lens:suppress false` restores opacity and re-arms the scheduler; the
+  // explicit resume event also recovers a renderer whose rAF loop went idle.
+  suppressLens(false);
+  sendLensResume();
+}
+
 function hideCard() {
   if (cardWindow && !cardWindow.isDestroyed() && cardWindow.isVisible()) {
     cardWindow.hide();
@@ -298,6 +326,9 @@ function resetFocusState() {
   state.misses = 0;
   state.inspectedGeneration = -1;
   state.nextInspectionAt = 0;
+  state.lastCaptureAt = 0;
+  state.lastCapturePointer = null;
+  state.lastCaptureAnchor = null;
   hideCard();
 }
 
@@ -316,8 +347,9 @@ function showLens() {
   lensWindow.setBounds({ x: frame.x, y: frame.y, width: LENS_WIDTH, height: LENS_HEIGHT });
   lensWindow.showInactive();
   // The renderer treats a false suppression value as a wake signal and
-  // re-arms its animation loop immediately.
-  suppressLens(false);
+  // re-arms its animation loop immediately. The explicit resume event also
+  // covers macOS when WindowServer briefly detaches the transparent window.
+  resumeLensRenderer();
   registerEscape();
   startTick();
   rememberClipboard(pointer, true);
@@ -349,7 +381,14 @@ function hideLens() {
 }
 
 function toggleLens() {
-  state.visible ? hideLens() : showLens();
+  // While a Linux capture hides the real window, state.visible is still true.
+  // Treat that as "show" so the hotkey/tray restores the eye instead of trying
+  // to hide an already hidden window.
+  const windowVisible = Boolean(
+    lensWindow && !lensWindow.isDestroyed() && lensWindow.isVisible()
+  );
+  if (state.visible && windowVisible) hideLens();
+  else showLens();
 }
 
 let escapeRegistered = false;
@@ -387,23 +426,28 @@ function tick() {
   pollClipboard();
   updateLensPosition(pointer);
   const now = uptime();
-  const moved = Math.hypot(pointer.x - state.pointer.x, pointer.y - state.pointer.y) >= 3;
+  const distance = Math.hypot(pointer.x - state.pointer.x, pointer.y - state.pointer.y);
+  const movement = classifyPointerMove(distance);
   state.pointer = pointer;
-  if (moved) {
+  if (movement !== 'stationary') {
     state.lastMoveAt = now;
-    state.generation += 1;
+    // Re-inspect after the pointer settles, but do not burn a new generation
+    // for trackpad jitter: that used to drop in-flight DeepSeek responses.
     state.inspectedGeneration = -1;
     state.nextInspectionAt = 0;
     state.misses = 0;
-    finishRemoteLoading();
-    state.currentAnchor = null;
-    state.currentSentence = null;
-    state.pendingWordKey = null;
-    state.activeSelectionHint = null;
-    state.pendingSelectionText = null;
-    state.selectionRequestId += 1;
-    hideCard();
-    sendLens({ reading: false });
+    if (shouldResetFocus(distance)) {
+      state.generation += 1;
+      finishRemoteLoading();
+      state.currentAnchor = null;
+      state.currentSentence = null;
+      state.pendingWordKey = null;
+      state.activeSelectionHint = null;
+      state.pendingSelectionText = null;
+      state.selectionRequestId += 1;
+      hideCard();
+      sendLens({ reading: false });
+    }
   }
   if (state.loadingShown) positionCard();
   if (!state.scanning && now - state.lastMoveAt >= 0.10 &&
@@ -489,11 +533,18 @@ async function captureAroundCursor(pointer) {
   if (cardWindow && !cardWindow.isDestroyed()) cardWindow.hide();
   // The eye sits exactly over the word being read. On Linux a transparent
   // always-on-top window still occludes the root-window capture, so hide the
-  // real window briefly while taking the frame.
+  // real window briefly while taking the frame. On macOS/Windows hiding and
+  // re-showing makes WindowServer rebuild the transparent window layer, which
+  // is the source of the violent eye flicker; there we only suppress painting.
   const restoreLens = state.visible && lensWindow && !lensWindow.isDestroyed();
-  if (restoreLens) lensWindow.hide();
-  suppressLens(true);
-  await delay(45);
+  const hideRealWindow = captureHidesLens(process.platform);
+  if (restoreLens) {
+    if (hideRealWindow) lensWindow.hide();
+    suppressLens(true);
+    // Give the compositor a moment to apply opacity 0 (or the Linux hide)
+    // before asking desktopCapturer for the root frame.
+    await delay(hideRealWindow ? 45 : 30);
+  }
 
   let thumbnail;
   try {
@@ -510,12 +561,17 @@ async function captureAroundCursor(pointer) {
     thumbnail = source.thumbnail;
   } finally {
     if (restoreLens && state.visible && lensWindow && !lensWindow.isDestroyed()) {
-      updateLensPosition(pointer);
-      lensWindow.showInactive();
+      if (hideRealWindow) {
+        updateLensPosition(pointer);
+        lensWindow.showInactive();
+      }
+      // Send this after showInactive so it both restores opacity and wakes the
+      // renderer loop even if the window was hidden for the capture.
+      resumeLensRenderer();
+    } else {
+      // Keep the renderer's suppression state clean for the next show.
+      suppressLens(false);
     }
-    // Send this after showInactive so it both restores opacity and wakes the
-    // renderer loop even if the window was hidden for the capture.
-    suppressLens(false);
   }
 
   const size = thumbnail.getSize();
@@ -553,12 +609,29 @@ function selectionDiagnostic(text, source) {
 
 async function inspectFocus() {
   if (state.scanning || !state.visible) return;
+  const now = uptime();
+  if (shouldReuseCapture({
+    now,
+    lastCaptureAt: state.lastCaptureAt,
+    pointer: state.pointer,
+    lastCapturePointer: state.lastCapturePointer,
+    anchor: state.currentAnchor,
+    lastCaptureAnchor: state.lastCaptureAnchor
+  })) {
+    // Same spot, same anchor: avoid another capture during trackpad jitter.
+    state.inspectedGeneration = -1;
+    state.nextInspectionAt = now + 0.4;
+    return;
+  }
   state.scanning = true;
   const generation = state.generation;
   state.inspectedGeneration = generation;
   sendLens({ reading: true, translated: false });
   try {
     const pointer = state.pointer;
+    state.lastCaptureAt = now;
+    state.lastCapturePointer = { x: pointer.x, y: pointer.y };
+    state.lastCaptureAnchor = state.currentAnchor;
     const [shot, hint] = await Promise.all([
       captureAroundCursor(pointer),
       currentSelectionHint()
@@ -602,7 +675,10 @@ async function inspectFocus() {
 
 function handleMiss() {
   state.misses += 1;
-  if (state.currentSentence !== null && state.misses >= 2) {
+  const pendingRemote = Boolean(state.pendingWordKey || state.pendingSelectionText);
+  // OCR can miss a frame under the eye. Do not kill an in-flight DeepSeek
+  // request unless the target has really disappeared for several scans.
+  if (state.currentSentence !== null && state.misses >= missLimit(pendingRemote)) {
     finishRemoteLoading();
     state.generation += 1;
     state.currentAnchor = null;
@@ -629,6 +705,8 @@ function translateWordFocus(passage, pointer) {
     hideCard();
     state.generation += 1;
     state.pendingWordKey = null;
+    state.pendingSelectionText = null;
+    state.selectionRequestId += 1;
   }
   state.currentAnchor = passage.anchor;
   state.currentSentence = passage.sentence;
@@ -679,18 +757,18 @@ function translateWordFocus(passage, pointer) {
     } catch (error) {
       log('FOCUS_TRANSLATION_ERROR=' + error.message);
       state.pendingWordKey = null;
+      showCard(remoteErrorCard({ kind: 'word', anchor: passage.anchor, error }));
       return;
     }
-    const requestGeneration = state.generation;
     beginRemoteLoading(
-      { type: 'word', generation: requestGeneration, key, anchor: passage.anchor },
+      { type: 'word', key, anchor: passage.anchor },
       passage.anchor,
-      () => state.visible && state.generation === requestGeneration &&
-        state.pendingWordKey === key && state.currentAnchor === passage.anchor
+      () => state.visible && state.pendingWordKey === key &&
+        state.currentAnchor === passage.anchor
     );
     deepSeekWord({ anchor: passage.anchor, sentence: passage.sentence, configuration })
-      .then((result) => receiveWord(requestGeneration, key, result))
-      .catch((error) => receiveWordError(requestGeneration, key, error));
+      .then((result) => receiveWord(key, passage.anchor, result))
+      .catch((error) => receiveWordError(key, passage.anchor, error));
   } else {
     const result = localTranslator.translateWord(passage.anchor);
     state.pendingWordKey = null;
@@ -709,43 +787,94 @@ function translateWordFocus(passage, pointer) {
   }
 }
 
-function receiveWord(generation, key, result) {
-  if (!state.visible || generation !== state.generation ||
-      state.pendingWordKey !== key || !state.currentAnchor) return;
-  state.pendingWordKey = null;
-  finishRemoteLoading();
-  state.wordCache.set(key, result);
+function receiveWord(key, anchor, result) {
+  // Cache first: a successful request is useful even if the focus moved on.
+  const outcome = acceptWordResult({
+    cache: state.wordCache,
+    visible: state.visible,
+    pendingKey: state.pendingWordKey,
+    key,
+    currentAnchor: state.currentAnchor,
+    anchor,
+    result
+  });
+  state.wordCache = outcome.cache;
+  const current = isCurrentWordRequest({
+    pendingKey: state.pendingWordKey,
+    key,
+    remoteLoading: state.remoteLoading
+  });
+  if (current) {
+    state.pendingWordKey = null;
+    finishRemoteLoading();
+  }
+  if (!outcome.display) {
+    log('FOCUS_TRANSLATION stale=true cache=yes display=no provider=deepSeek');
+    return;
+  }
   showCard({
     kind: 'word',
-    title: `${state.currentAnchor} · ${result.basis}`,
+    title: `${anchor} · ${result.basis}`,
     text: result.chinese
   });
   log(`FOCUS_TRANSLATION resolved=yes basis=${result.basis} provider=deepSeek`);
 }
 
-function receiveWordError(generation, key, error) {
+function receiveWordError(key, anchor, error) {
+  log('SENTENCE_TRANSLATION_ERROR=' + (error?.message || error));
   // A stale request may fail after the user has already moved to a new target.
   // Do not let it clear the newer loading card or its pending key.
-  if (generation !== state.generation || state.pendingWordKey !== key) return;
+  const current = state.visible &&
+    state.currentAnchor === anchor &&
+    isCurrentWordRequest({
+      pendingKey: state.pendingWordKey,
+      key,
+      remoteLoading: state.remoteLoading
+    });
+  if (!current) {
+    log('FOCUS_TRANSLATION stale=true error_ignored=true provider=deepSeek');
+    return;
+  }
   state.pendingWordKey = null;
   finishRemoteLoading();
-  log('SENTENCE_TRANSLATION_ERROR=' + (error?.message || error));
+  const card = remoteErrorCard({ kind: 'word', anchor, error });
+  showCard(card);
+  log('FOCUS_TRANSLATION error_shown text=' + card.text);
 }
 
 function translateSelection(text, pointer) {
   const settings = settingsStore.getPublic();
+  const selectionChanged = state.activeSelectionHint !== text;
   state.activeSelectionHint = text;
   state.currentAnchor = null;
   state.currentSentence = null;
+
+  // A visible selection takes precedence over any word request in flight.
+  if (state.pendingWordKey) {
+    state.pendingWordKey = null;
+    if (state.remoteLoading?.type === 'word') finishRemoteLoading();
+  }
+  if (selectionChanged && state.pendingSelectionText) {
+    state.pendingSelectionText = null;
+    state.selectionRequestId += 1;
+    if (state.remoteLoading?.type === 'selection') finishRemoteLoading();
+  }
+
   const cached = state.selectionCache.get(text);
   if (cached) {
+    if (state.pendingSelectionText === text) {
+      state.pendingSelectionText = null;
+      if (state.remoteLoading?.type === 'selection') finishRemoteLoading();
+    }
     showCard({ kind: 'selection', title: '选区翻译', text: cached });
     return;
   }
-  if (state.pendingSelectionText === text) return;
+  if (state.pendingSelectionText === text) {
+    state.nextInspectionAt = uptime() + 2.0;
+    return;
+  }
   const requestId = ++state.selectionRequestId;
   state.pendingSelectionText = text;
-  state.generation += 1;
   state.inspectedGeneration = -1;
   state.nextInspectionAt = uptime() + 2.0;
   hideCard();
@@ -758,6 +887,7 @@ function translateSelection(text, pointer) {
     } catch (error) {
       state.pendingSelectionText = null;
       log('SELECTION_TRANSLATION_ERROR=' + error.message);
+      showCard(remoteErrorCard({ kind: 'selection', error }));
       return;
     }
     beginRemoteLoading(
@@ -784,33 +914,66 @@ function translateSelection(text, pointer) {
 }
 
 function receiveSelection(requestId, text, chinese) {
-  if (!state.visible || requestId !== state.selectionRequestId ||
-      state.pendingSelectionText !== text || state.activeSelectionHint !== text) return;
-  state.pendingSelectionText = null;
-  finishRemoteLoading();
+  // Cache first, then decide whether the selection is still on screen/current.
+  const outcome = acceptSelectionResult({
+    cache: state.selectionCache,
+    visible: state.visible,
+    pendingText: state.pendingSelectionText,
+    text,
+    activeSelectionHint: state.activeSelectionHint,
+    result: chinese
+  });
+  state.selectionCache = outcome.cache;
+  const current = isCurrentSelectionRequest({
+    pendingText: state.pendingSelectionText,
+    requestId,
+    text,
+    remoteLoading: state.remoteLoading
+  });
+  if (current) {
+    state.pendingSelectionText = null;
+    finishRemoteLoading();
+  }
+  if (!outcome.display) {
+    log('SELECTION_TRANSLATION stale=true cache=yes display=no provider=deepSeek');
+    return;
+  }
   if (!chinese) {
     hideCard();
     return;
   }
-  state.selectionCache.set(text, chinese);
   showCard({ kind: 'selection', title: '选区翻译', text: chinese });
   log('SELECTION_TRANSLATION resolved=yes provider=deepSeek');
 }
 
 function receiveSelectionError(requestId, text, error) {
-  if (requestId !== state.selectionRequestId || state.pendingSelectionText !== text) return;
+  log('SELECTION_TRANSLATION_ERROR=' + (error?.message || error));
+  const current = state.visible &&
+    isCurrentSelectionRequest({
+      pendingText: state.pendingSelectionText,
+      requestId,
+      text,
+      remoteLoading: state.remoteLoading
+    }) &&
+    state.activeSelectionHint === text;
+  if (!current) {
+    log('SELECTION_TRANSLATION stale=true error_ignored=true provider=deepSeek');
+    return;
+  }
   state.pendingSelectionText = null;
   finishRemoteLoading();
-  hideCard();
-  log('SELECTION_TRANSLATION_ERROR=' + (error?.message || error));
+  const card = remoteErrorCard({ kind: 'selection', error });
+  showCard(card);
+  log('SELECTION_TRANSLATION error_shown text=' + card.text);
 }
 
 function updateTrayMenu() {
   if (!tray) return;
   const settings = settingsStore ? settingsStore.getPublic() : { provider: 'local' };
+  const wakeShortcut = process.platform === 'darwin' ? '⌃⌥L' : 'Ctrl+Alt+L';
   const menu = Menu.buildFromTemplate([
     {
-      label: state.visible ? '隐藏眼睛 (Esc)' : '显示眼睛 (Ctrl+Alt+L)',
+      label: state.visible ? '隐藏眼睛 (Esc)' : `显示眼睛 (${wakeShortcut})`,
       click: toggleLens
     },
     { type: 'separator' },
@@ -841,7 +1004,7 @@ function updateTrayMenu() {
           title: 'EasyLens',
           message: 'EasyLens · Electron',
           detail: '按住鼠标停在英文上查看中文。\n' +
-            'Ctrl+Alt+L 显示/隐藏眼睛，Esc 隐藏。\n\n' +
+            `${wakeShortcut} 显示/隐藏眼睛，Esc 隐藏。\n\n` +
             'Linux 版使用 desktopCapturer 与 Tesseract 识别屏幕文字；' +
             '本地翻译是内置英汉词典，DeepSeek 可在设置中配置。'
         });
@@ -966,7 +1129,7 @@ async function bootstrap() {
   const registered = globalShortcut.register('Control+Alt+L', toggleLens);
   log(registered
     ? 'WAKE_HOTKEY_REGISTERED=Control+Alt+L'
-    : 'ERROR wake hotkey unavailable');
+    : 'ERROR wake hotkey unavailable: Control+Alt+L');
   log('EASYLENS_READY platform=' + process.platform + ' electron=' + process.versions.electron);
   log('TRANSLATION_PROVIDER=' + settingsStore.getPublic().provider + ' screenshots_saved=0');
 

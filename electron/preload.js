@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('easylens', {
   platform: process.platform,
   onLensState: (callback) => subscribe('lens:state', callback),
   onLensSuppress: (callback) => subscribe('lens:suppress', callback),
+  onLensResume: (callback) => subscribe('lens:resume', callback),
   onCardShow: (callback) => subscribe('card:show', callback),
   lensReady: () => ipcRenderer.send('lens:ready'),
   resizeCard: (size) => ipcRenderer.send('card:resize', size),

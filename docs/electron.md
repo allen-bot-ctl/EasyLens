@@ -10,7 +10,7 @@
 | 全局快捷键 | `globalShortcut` 注册 `Control+Alt+L`；显示时临时注册 `Escape` | 快捷键被其他应用占用时注册失败，日志会给出 `ERROR wake hotkey unavailable`。 |
 | 跟随鼠标的透明眼睛 | 190×114 透明无边框窗口，Canvas 绘制眼睛与红色呼吸灯 | 没有原生毛玻璃，使用半透明填充和中心挖空近似。 |
 | 屏幕取像 | `desktopCapturer` 截取光标所在显示器，按 DIP/缩放裁剪约 900×240 | Wayland 依赖 PipeWire/portal；黑屏时优先用 X11。 |
-| 取像时排除自身 | 截屏前短暂隐藏眼睛与翻译卡 | 会在静止扫描时造成很短的闪烁；重扫间隔提高到 2 秒。 |
+| 取像时排除自身 | Linux 短暂隐藏真窗口；macOS/Windows 只把渲染层设为透明并跳过绘制，不隐藏窗口 | Linux 的隐藏路径会在静止扫描时造成很短的闪烁；重扫间隔提高到 2 秒。macOS/Windows 不再频繁重建窗口层级。 |
 | OCR | Tesseract.js + `@tesseract.js-data/eng`，随包离线语言数据 | 只识别英文；精度和版面分析弱于 Vision。 |
 | 英文门控 | `focus-text.js` 的 `eligibleEnglishText`、路径/代码过滤和拉丁字母判断 | 不使用系统语言识别器，混排文本的判定更保守。 |
 | 鼠标中心词 | Tesseract 词框 + 归一化距离，选择中心附近最近的合法英文词 | 词框不是 Vision 的逐字符框，斜体/多列场景可能偏移。 |
@@ -26,6 +26,7 @@
 | `electron/main.js` | 应用生命周期、托盘、窗口、快捷键、鼠标循环、截屏、异步翻译调度与缓存。 |
 | `electron/preload.js` | `contextBridge` 暴露的最小 IPC API。 |
 | `electron/app/focus-text.js` | 从 Swift `FocusText.swift` / `SelectionReader.swift` 迁移的纯文本逻辑：英文门控、选区规范化、边界投影、焦点校验。 |
+| `electron/app/focus-session.js` | 纯焦点/请求生命周期：微移与大位移判定、截屏去重、OCR miss 阈值、成功结果缓存优先与错误文案。 |
 | `electron/app/ocr.js` | Tesseract 生命周期、词框提取、按中心点选词与上下文句子。 |
 | `electron/app/local-dictionary.js` | 内置词库加载、词形还原、简短释义清理。 |
 | `electron/app/local-translator.js` | 离线单词/选区回退翻译。 |
@@ -38,12 +39,13 @@
 
 ## 一次焦点扫描的数据流
 
-1. 主进程每 16ms 读取鼠标位置，移动超过 3px 就更新眼睛位置、递增 generation、清空等待态。
-2. 鼠标停稳 100ms 后，隐藏眼睛和翻译卡，用 `desktopCapturer` 截取光标附近 900×240（DIP）区域，然后立即恢复眼睛。
+1. 主进程每 16ms 读取鼠标位置并同步眼睛位置。移动 3–15px 只触发重新观察，不递增 generation、不清空等待态；达到 16px 才视为明显换位并清理当前焦点。
+2. 鼠标停稳 100ms 后，Linux 隐藏眼睛与翻译卡再截取光标附近 900×240（DIP）区域，随后 `showInactive()`；macOS/Windows 只用 `lens:suppress` 让透明 Canvas 停止绘制，再截屏，避免 WindowServer 反复重建窗口层级导致闪烁。同一位置/锚点的 400ms 内重复截屏会被跳过。
 3. Tesseract 识别英文词框；`findFocus` 用中心距离选择词，并组合相邻行作为上下文。
 4. 同时读取 PRIMARY/剪贴板 hint。若 hint 通过英文门控且包含焦点词，优先走完整选区，否则走单词。
-5. 本地来源立即查词；DeepSeek 在 180ms 后显示「正在转译」卡。结果按 generation/requestId 校验，过期结果丢弃。
-6. 翻译成功或失败都会更新眼睛的黄色状态；移动、目标变化和设置变更会清缓存并使旧请求失效。
+5. 本地来源立即查词；DeepSeek 在 180ms 后显示「正在转译」卡。成功结果先写入缓存，再用「窗口可见 + pending key/选区文本 + 当前锚点」判断是否展示；微颤造成的 generation 变化不再丢弃在途请求。OCR 连续 miss 时，有在途远端请求会容忍更多次确认。
+6. 翻译成功或失败都会更新眼睛的黄色状态；失败会显示短错误卡（超时、连接失败、HTTP 状态、未配置密钥等），不会静默隐藏。明显移动、选区变化、主动隐藏和设置变更会清缓存并使旧请求失效。
+7. 显示、托盘恢复和截屏结束后发送 `lens:suppress false` + `lens:resume`，让渲染层立刻重绘完整眼睛。`toggleLens()` 会在 `state.visible` 为真但窗口实际不可见（例如 Linux 截屏隐藏期间）时优先恢复显示。
 
 ## 构建与验证
 
@@ -59,7 +61,7 @@ npm run smoke
 
 本机已验证：
 
-- `npm test`：28 个测试通过（英文门控、选区边界、格式保留、DeepSeek 请求体、密钥权限、OCR 几何）。
+- `npm test`：39 个测试通过（英文门控、选区边界、格式保留、DeepSeek 请求体、密钥权限、OCR 几何、微移/换词请求生命周期、错误文案与截屏去重）。
 - `npm run test:ocr`：输出 `OCR_SELF_TEST_OK`。
 - `npm run smoke`：输出 `EASYLENS_READY`、`LENS_SHOWN`、`SMOKE_TEST_OK`。
 - `npm run build`：生成 `dist/linux-unpacked/easylens`，打包后的二进制同样通过 smoke。

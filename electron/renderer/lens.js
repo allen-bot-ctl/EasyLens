@@ -223,6 +223,10 @@ window.easylens.onLensSuppress((value) => {
   scheduler.setSuppressed(next);
 });
 
+window.easylens.onLensResume(() => {
+  wakeRenderer();
+});
+
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) wakeRenderer();
 });
