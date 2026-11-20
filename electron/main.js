@@ -1312,21 +1312,16 @@ async function bootstrap() {
   createCardWindow();
   createTray();
 
-  // On macOS Option is also called Alt. Register both spellings so users can
-  // use either; if Electron resolves them to the same accelerator the second
-  // registration fails and the first remains active.
-  const wakeAccelerators = process.platform === 'darwin'
-    ? ['Control+Alt+L', 'Control+Option+L']
-    : ['Control+Alt+L'];
-  for (const accelerator of wakeAccelerators) {
-    try {
-      const registered = globalShortcut.register(accelerator, toggleLens);
-      log(registered
-        ? `WAKE_HOTKEY_REGISTERED=${accelerator}`
-        : `ERROR wake hotkey unavailable: ${accelerator}`);
-    } catch (error) {
-      log(`ERROR wake hotkey ${accelerator}`, error.message);
-    }
+  // Electron maps Alt to Option on macOS, so Control+Alt+L covers ⌃⌥L across
+  // all platforms without triggering a duplicate-registration error.
+  const wakeAccelerator = 'Control+Alt+L';
+  try {
+    const registered = globalShortcut.register(wakeAccelerator, toggleLens);
+    log(registered
+      ? `WAKE_HOTKEY_REGISTERED=${wakeAccelerator}`
+      : `ERROR wake hotkey unavailable: ${wakeAccelerator}`);
+  } catch (error) {
+    log(`ERROR wake hotkey ${wakeAccelerator}`, error.message);
   }
   log('EASYLENS_READY platform=' + process.platform + ' electron=' + process.versions.electron);
   log('TRANSLATION_PROVIDER=' + settingsStore.getPublic().provider + ' screenshots_saved=0');
@@ -1366,14 +1361,23 @@ if (!lock) {
     // Tray application: keep running when all helper windows are hidden.
   });
 
-  app.on('before-quit', async () => {
+  app.on('before-quit', () => {
     quitting = true;
     stopTick();
+    // lensWindow and cardWindow use closable: false, which makes macOS refuse
+    // to close them and abort app.quit() / "Quit & Reopen" in System Settings.
+    // Destroy them explicitly so quitting always completes cleanly.
+    for (const win of [lensWindow, cardWindow, settingsWindow]) {
+      if (win && !win.isDestroyed()) win.destroy();
+    }
+    if (ocrService) {
+      ocrService.terminate().catch(() => {});
+    }
+  });
+
+  app.on('will-quit', () => {
     unregisterEscape();
     try { globalShortcut.unregisterAll(); } catch { /* ignore */ }
-    if (ocrService) {
-      try { await ocrService.terminate(); } catch { /* ignore */ }
-    }
   });
 }
 
