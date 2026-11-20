@@ -55,6 +55,19 @@ struct MacOSSelectionMain {
             writeDiagnostic("macos-selection-reader: no selection (state=\(live.state))")
             exit(1)
         }
+        if arguments.contains("--json") {
+            let payload: [String: Any] = [
+                "text": text,
+                "pointHit": live.pointHit,
+                "geometryAvailable": live.geometryAvailable,
+                "state": live.state
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: payload),
+               let json = String(data: data, encoding: .utf8) {
+                print(json)
+                return
+            }
+        }
         // stdout carries the selected text and nothing else.
         print(text)
     }

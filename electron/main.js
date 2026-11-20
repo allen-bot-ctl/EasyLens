@@ -216,6 +216,11 @@ function createLensWindow() {
   lensWindow.setAlwaysOnTop(true, 'screen-saver');
   lensWindow.setIgnoreMouseEvents(true, { forward: true });
   lensWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  if (process.platform === 'darwin') {
+    // Exclude the eye overlay from desktopCapturer (NSWindowSharingNone) so
+    // OCR sees unobstructed text under the pupil with zero window flicker.
+    lensWindow.setContentProtection(true);
+  }
   lensWindow.loadFile(path.join(__dirname, 'renderer', 'lens.html'));
   lensWindow.on('closed', () => { lensWindow = null; });
 }
@@ -248,6 +253,9 @@ function createCardWindow() {
   cardWindow.setAlwaysOnTop(true, 'screen-saver');
   cardWindow.setIgnoreMouseEvents(true, { forward: true });
   cardWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  if (process.platform === 'darwin') {
+    cardWindow.setContentProtection(true);
+  }
   cardWindow.loadFile(path.join(__dirname, 'renderer', 'card.html'));
   cardWindow.on('closed', () => { cardWindow = null; });
 }
@@ -608,11 +616,24 @@ async function readMacosPrimarySelection(pointer) {
   try {
     const { stdout } = await execFileAsync(
       binary,
-      ['--point', String(pointer.x), String(pointer.y)],
+      ['--json', '--point', String(pointer.x), String(pointer.y)],
       { timeout: 1500, maxBuffer: 64 * 1024, encoding: 'utf8' }
     );
-    const text = typeof stdout === 'string' ? stdout.trim() : '';
-    return text || null;
+    const raw = typeof stdout === 'string' ? stdout.trim() : '';
+    if (!raw) return null;
+    if (raw.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(raw);
+        const text = typeof parsed.text === 'string' ? parsed.text.trim() : '';
+        if (!text) return null;
+        return {
+          text,
+          pointHit: Boolean(parsed.pointHit),
+          geometryAvailable: Boolean(parsed.geometryAvailable)
+        };
+      } catch { /* fall through to plain text */ }
+    }
+    return { text: raw, pointHit: false, geometryAvailable: false };
   } catch (error) {
     // The reader exits non-zero when there is no selection or accessibility
     // permission; that is the normal empty result, not a failure to log.
@@ -661,11 +682,19 @@ async function readPrimarySelection(pointer) {
 async function currentSelectionHint(pointer) {
   const primary = await readPrimarySelection(pointer);
   if (primary) {
-    const eligible = eligibleEnglishText(primary, 4000);
-    if (eligible) return { text: eligible, source: 'primary' };
+    const rawText = typeof primary === 'string' ? primary : primary.text;
+    const eligible = eligibleEnglishText(rawText, 4000);
+    if (eligible) {
+      return {
+        text: eligible,
+        source: 'primary',
+        pointHit: typeof primary === 'object' ? Boolean(primary.pointHit) : false,
+        geometryAvailable: typeof primary === 'object' ? Boolean(primary.geometryAvailable) : false
+      };
+    }
   }
   if (state.clipboardHint && uptime() < state.clipboardHintExpiresAt) {
-    return { text: state.clipboardHint, source: 'clipboard' };
+    return { text: state.clipboardHint, source: 'clipboard', pointHit: false, geometryAvailable: false };
   }
   return null;
 }
@@ -796,6 +825,17 @@ async function inspectFocus() {
     state.lastCaptureAt = now;
     state.lastCapturePointer = { x: pointer.x, y: pointer.y };
     state.lastCaptureAnchor = state.currentAnchor;
+    // On macOS, when Accessibility geometry confirms the cursor is directly
+    // inside the highlighted selection (pointHit === true), translate the
+    // selection immediately without waiting for Tesseract OCR (which struggles
+    // on dark-mode blue-highlighted sparse text).
+    if (hint && hint.pointHit) {
+      if (!state.visible || generation !== state.generation) return;
+      state.misses = 0;
+      selectionDiagnostic(hint.text, hint.source);
+      translateSelection(hint.text, pointer);
+      return;
+    }
     const words = await ocrService.recognize(shot.image);
     if (process.env.EASYLENS_DEBUG_OCR === '1') {
       log('OCR_WORDS=' + words.map((word) => word.text).join(' | '));
@@ -805,14 +845,15 @@ async function inspectFocus() {
       words,
       { x: shot.focusX, y: shot.focusY },
       { width: shot.width, height: shot.height },
-      hint?.text || null
+      hint && (!hint.geometryAvailable || hint.pointHit) ? hint.text : null
     );
     if (!passage) {
       handleMiss(pointer);
       return;
     }
     state.misses = 0;
-    if (hint && hintSupportsFocus(hint.text, passage.anchor)) {
+    const selectionAllowed = hint && (!hint.geometryAvailable || hint.pointHit);
+    if (selectionAllowed && hintSupportsFocus(hint.text, passage.anchor)) {
       selectionDiagnostic(hint.text, hint.source);
       translateSelection(hint.text, pointer);
     } else {
