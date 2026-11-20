@@ -846,15 +846,17 @@ async function inspectFocus() {
       words,
       { x: shot.focusX, y: shot.focusY },
       { width: shot.width, height: shot.height },
-      hint && (!hint.geometryAvailable || hint.pointHit) ? hint.text : null
+      hint?.text || null
     );
     if (!passage) {
       handleMiss(pointer);
       return;
     }
     state.misses = 0;
-    const selectionAllowed = hint && (!hint.geometryAvailable || hint.pointHit);
-    if (selectionAllowed && hintSupportsFocus(hint.text, passage.anchor)) {
+    // Do not let a false Chromium multi-block geometry miss veto a valid
+    // selection whose text matches the OCR focus word (e.g. a heading like
+    // "Terms" selected together with a following section).
+    if (hint && hintSupportsFocus(hint.text, passage.anchor)) {
       selectionDiagnostic(hint.text, hint.source);
       translateSelection(hint.text, pointer);
     } else {
