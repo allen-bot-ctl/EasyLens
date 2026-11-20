@@ -68,7 +68,41 @@ npm run smoke
 - 在 Xvfb + xfce4-terminal 中把固定焦点放在白色终端文本上，实际走通 `desktopCapturer → Tesseract → findFocus → 本地词典`，识别到 `world` 并显示译文；日志为 `FOCUS_TRANSLATION resolved=yes basis=本地词典`。
 - 在同一环境用鼠标选中整行英文后启动，走通 Electron `clipboard` 的 PRIMARY 读取：`SELECTION_HINT source=primary length=57`，随后 `SELECTION_TRANSLATION resolved=yes provider=local fallback=true`。这验证了选区优先和本地逐词回退，不代表任意应用的高亮几何都能被确认。
 
-未验证：Wayland 实际捕获、GNOME/KDE 托盘、真实用户 DeepSeek Key、复杂网页选区、不同字体/缩放的 OCR 准确率、Windows/macOS Electron 构建。
+未验证：Wayland 实际捕获、GNOME/KDE 托盘、复杂网页/多字体/缩放的 OCR 准确率、Windows 与 macOS Apple Silicon（arm64）实机构建，以及 `release.yml` 通用二进制在 GitHub Actions 上的新 tag 运行结果。
+
+## macOS 实机排查与经验记录（macOS 15.7.7 x86_64）
+
+以下为 2026-11-19 在 macOS 15.7.7（Intel x86_64）上对 `/Applications/EasyLens.app` 的实机排障事实与已落地修复，供后续迭代与云端协作参考：
+
+### 1. ad-hoc 签名与 TCC `CDHash` 冲突（开关亮着但始终提示未授权）
+
+- **实证事实**：`tccd` 系统日志明确报错 `Failed to match existing code requirement for subject ai.nangua.EasyLens and service kTCCServiceScreenCapture (cdhash H"...")`；在系统设置里反复开关蓝条只改 `auth_value`，**不会更新已绑定的 `cdhash`**。同时，直接修改 `.app` 内文件会导致 `codesign --verify --deep --strict` 报 `nested code is modified or invalid`，嵌套无签名二进制会被 `tccd` 标记为 `<ID of InvalidCode>`。
+- **处理方法**：修改 `.app` 后必须对嵌套助手（`electron/bin/macos-selection-reader`）和整个 `.app` 执行 `codesign --force --deep --sign -`，并确认 `codesign --verify --deep --strict` 返回 `valid on disk`。升级或重签 ad-hoc 包后，必须先在系统设置中点 **`-`** 移除旧条目（或执行 `tccutil reset ScreenCapture ai.nangua.EasyLens` 与 `tccutil reset Accessibility ai.nangua.EasyLens`），再点 **`+`** 重新添加 `/Applications/EasyLens.app`。
+- **已知边界**：只要继续使用 `"identity": null`（ad-hoc），每次发版/重签都会更换 `CDHash`；如需升级不掉权限，需切换到固定自签名证书或 Developer ID 证书。
+
+### 2. `closable: false` 阻断 macOS 退出并注销全部全局快捷键
+
+- **实证事实**：`lensWindow` 与 `cardWindow` 创建时带有 `closable: false`。触发退出（如系统设置授权后点击「退出并重新打开」、菜单栏「退出 EasyLens」或 `⌘Q`）时，`before-quit` 先执行了 `globalShortcut.unregisterAll()`，随后 macOS 拒绝关闭不可关闭窗口并中止退出，导致进程残留且 `⌃⌥L` 与 `Esc` 全部失效。
+- **已落地修复**：`before-quit` 中显式对 `lensWindow`、`cardWindow`、`settingsWindow` 调用 `.destroy()` 确保退出完成；将 `unregisterEscape()` 与 `globalShortcut.unregisterAll()` 移至 `will-quit`；macOS 仅注册一次 `Control+Alt+L`。
+
+### 3. 截屏失败时 800ms 重试退避被每 16ms `tick()` 清零
+
+- **实证事实**：未授权录屏时，`scheduleCaptureRetry` 写入的 `nextInspectionAt = now + 0.8` 会在 16ms 后的下一次 `tick()` 中被 `movement !== 'stationary'` 清零，导致日志以 60fps 狂刷 `CAPTURE_ERROR` 并拉高 CPU。
+- **已落地修复**：仅在鼠标真实物理移动（`frameDistance >= 1.5`）时清零 `nextInspectionAt`；实测未授权重试间隔已稳定为 ~800ms。
+
+### 4. macOS 划选读取超时与 14.79 秒 AX DOM 重复遍历
+
+- **实证事实**：在已确认辅助功能授权通过（`tccd` 返回 `authValue=2`）的前提下，在浏览器（多屏坐标 `--point 2160 726`）划选单段标题 `"What's covered in these terms"` 仍高概率退回单词翻译。直接计时执行 `macos-selection-reader --point 2160 726` 耗时 **14.79 秒**（`2.98s user + 1.30s sys`），被 Electron 子进程超时强杀（日志 `SELECTION_READER_FAILED`）。
+- **根因**：`Sources/EasyLens/SelectionReader.swift` 的 `structuredSelectionText()` 在单段选区未命中多段时未写入缓存，导致 `inspectAncestors` 遍历祖先链时重复对整棵网页 AX DOM 树做全量扫描；此外旧版 Electron 超时过短（`250ms` / `350ms`）、未对 Chromium/Electron 设置 `AXEnhancedUserInterface = true`、只查询 `frontmostApplication`、托盘菜单未提示辅助功能授权状态，且 CI 仅编译单架构 `macos-selection-reader`。
+- **已落地修复**：
+  - `SelectionReader.swift` 增加 `AXStaticText` 单节点 0ms 快路径、180ms 时间上限、最多遍历 3 个容器（`maxNodes: 300`）以及未命中缓存，同坐标实测耗时从 14.79 秒降至 `< 0.7s`（CPU 约 30ms），实机划选整句翻译验收通过。
+  - `SelectionReader.swift` 优先通过系统级光标命中获取光标所在窗口 PID（支持非前台窗口）并设置 `AXEnhancedUserInterface = true` 与 `0.5s` AX 超时。
+  - `electron/main.js` 将 `macos-selection-reader` 超时放宽至 `1500ms`，并在 macOS 托盘菜单增加「辅助功能（划选翻译）」授权状态与一键跳转。
+  - `.github/workflows/release.yml` 改为用 `swiftc` + `lipo` 编译 `arm64 + x86_64` 通用二进制并 ad-hoc 签名。
+
+### 5. 托盘图标点击交互
+
+- 移除 `tray.on('click', toggleLens)`，点击系统托盘图标仅展开下拉菜单，眼睛的显示/隐藏只通过下拉菜单项与快捷键（`⌃⌥L` / `Esc`）触发。
 
 ## 调试入口
 
