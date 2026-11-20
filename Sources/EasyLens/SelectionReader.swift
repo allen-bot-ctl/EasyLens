@@ -450,6 +450,26 @@ private func structuredSelectionText(from element: AXUIElement,
         return cached
     }
 
+    // Fast path: if the pointed leaf node (or element itself) is a single
+    // AXStaticText whose value already contains the entire selection, it cannot
+    // span multiple blocks; skip the expensive AX tree walk completely.
+    let trimmedRaw = cleanSelectionFragment(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+    if let leaf = hitChain.first {
+        var roleRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(leaf, kAXRoleAttribute as CFString, &roleRef)
+        if (roleRef as? String) == "AXStaticText" {
+            var valRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(leaf, kAXValueAttribute as CFString, &valRef) == .success,
+               let leafText = valRef as? String,
+               cleanSelectionFragment(leafText).contains(trimmedRaw) {
+                structuredSelectionCache.set(raw: raw, structured: raw)
+                return raw
+            }
+        }
+    }
+
+    let deadline = uptime() + 0.18
+
     // Build candidate containers starting from the local containers enclosing
     // the hit leaf element up to broader document containers.
     var candidates: [AXUIElement] = []
@@ -468,6 +488,7 @@ private func structuredSelectionText(from element: AXUIElement,
     var downChain: [AXUIElement] = [element]
     var current = element
     for _ in 0..<6 {
+        guard uptime() < deadline else { break }
         var childrenRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(current, kAXChildrenAttribute as CFString, &childrenRef) == .success,
               let children = childrenRef as? [AXUIElement],
@@ -485,6 +506,7 @@ private func structuredSelectionText(from element: AXUIElement,
 
     var parentCursor = element
     for _ in 0..<8 {
+        guard uptime() < deadline else { break }
         var parentRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(parentCursor, kAXParentAttribute as CFString, &parentRef) == .success,
               let parentRef else { break }
@@ -494,7 +516,9 @@ private func structuredSelectionText(from element: AXUIElement,
     }
 
     let pivotChain = hitChain + candidates
+    var walkedContainers = 0
     for candidate in candidates {
+        guard uptime() < deadline, walkedContainers < 3 else { break }
         var roleRef: CFTypeRef?
         AXUIElementCopyAttributeValue(candidate, kAXRoleAttribute as CFString, &roleRef)
         let role = (roleRef as? String) ?? ""
@@ -502,13 +526,17 @@ private func structuredSelectionText(from element: AXUIElement,
            role == "AXApplication" || role == "AXWindow" {
             continue
         }
-        let blocks = collectAXBlocks(from: candidate, pivotChain: pivotChain)
+        walkedContainers += 1
+        let blocks = collectAXBlocks(from: candidate, pivotChain: pivotChain, maxNodes: 300)
         if let matched = matchSelectionInBlocks(raw: raw, blocks: blocks) {
             structuredSelectionCache.set(raw: raw, structured: matched)
             return matched
         }
     }
 
+    // Cache the miss too so inspecting the rest of the ancestor chain does not
+    // re-walk the same DOM tree repeatedly for a single-paragraph selection.
+    structuredSelectionCache.set(raw: raw, structured: raw)
     return raw
 }
 
