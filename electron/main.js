@@ -501,7 +501,10 @@ function tick() {
   const movement = classifyPointerMove(distance);
   if (movement !== 'stationary') {
     state.inspectedGeneration = -1;
-    state.nextInspectionAt = 0;
+    // 仅在物理移动时清除退避定时器，避免截屏失败的 800ms 重试退避每 16ms 被清零
+    if (frameDistance >= 1.5) {
+      state.nextInspectionAt = 0;
+    }
     state.misses = 0;
     if (shouldResetFocus(distance)) {
       // 只有之前有锚点时才递增 generation 并清理，避免静止在新词上每帧空转自增
