@@ -584,21 +584,39 @@ func readLiveSelection(at pointer: CGPoint? = nil,
         return LiveSelection(text: nil, state: "permission-denied", pointHit: false,
                              geometryAvailable: false)
     }
-    guard let pid = targetPID ?? NSWorkspace.shared.frontmostApplication?.processIdentifier,
+    let resolvedPoint = pointer.map { axPoint($0) }
+    var systemHitElement: AXUIElement?
+    var resolvedPID = targetPID
+    if resolvedPID == nil, let point = resolvedPoint {
+        let system = AXUIElementCreateSystemWide()
+        var hitAtCursor: AXUIElement?
+        if AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y),
+                                            &hitAtCursor) == .success, let hitAtCursor {
+            var owner: pid_t = 0
+            if AXUIElementGetPid(hitAtCursor, &owner) == .success,
+               owner != ProcessInfo.processInfo.processIdentifier {
+                resolvedPID = owner
+                systemHitElement = hitAtCursor
+            }
+        }
+    }
+    guard let pid = resolvedPID ?? NSWorkspace.shared.frontmostApplication?.processIdentifier,
           pid != ProcessInfo.processInfo.processIdentifier else {
         return LiveSelection(text: nil, state: "no-target", pointHit: false,
                              geometryAvailable: false)
     }
     let application = AXUIElementCreateApplication(pid)
-    AXUIElementSetMessagingTimeout(application, 0.2)
+    AXUIElementSetMessagingTimeout(application, 0.5)
+    // Chromium/Electron apps keep their web accessibility tree disabled until
+    // an assistive client opts in via AXEnhancedUserInterface.
+    _ = AXUIElementSetAttributeValue(application, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
     var focused: CFTypeRef?
     AXUIElementCopyAttributeValue(application, kAXFocusedUIElementAttribute as CFString,
                                   &focused)
-    guard let pointer else {
+    guard let pointer, let point = resolvedPoint else {
         guard let focused else { return empty }
         return selectionOnElement(focused as! AXUIElement, pointer: nil)?.0 ?? empty
     }
-    let point = axPoint(pointer)
     var best: (LiveSelection, Int)?
     var visualCandidate: (LiveSelection, Int)?
     var deepestHitChain: [AXUIElement] = []
@@ -637,13 +655,17 @@ func readLiveSelection(at pointer: CGPoint? = nil,
     // The system-wide hit can expose the actual web text; accept it only when
     // the returned element belongs to the same foreground process.
     if best == nil {
-        let system = AXUIElementCreateSystemWide()
-        var globalHit: AXUIElement?
-        if AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y),
-                                            &globalHit) == .success, let globalHit {
-            var owner: pid_t = 0
-            if AXUIElementGetPid(globalHit, &owner) == .success, owner == pid {
-                inspectAncestors(globalHit)
+        if let systemHitElement {
+            inspectAncestors(systemHitElement)
+        } else {
+            let system = AXUIElementCreateSystemWide()
+            var globalHit: AXUIElement?
+            if AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y),
+                                                &globalHit) == .success, let globalHit {
+                var owner: pid_t = 0
+                if AXUIElementGetPid(globalHit, &owner) == .success, owner == pid {
+                    inspectAncestors(globalHit)
+                }
             }
         }
     }

@@ -609,7 +609,7 @@ async function readMacosPrimarySelection(pointer) {
     const { stdout } = await execFileAsync(
       binary,
       ['--point', String(pointer.x), String(pointer.y)],
-      { timeout: 350, maxBuffer: 64 * 1024, encoding: 'utf8' }
+      { timeout: 1500, maxBuffer: 64 * 1024, encoding: 'utf8' }
     );
     const text = typeof stdout === 'string' ? stdout.trim() : '';
     return text || null;
