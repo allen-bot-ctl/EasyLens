@@ -15,7 +15,7 @@ const execFileAsync = promisify(execFile);
 const { createSettingsStore } = require('./app/settings-store');
 const { createFileLogger } = require('./app/file-log');
 const { createOcrService, findFocus } = require('./app/ocr');
-const { preprocessDarkBitmap } = require('./app/ocr-preprocess');
+const { preprocessCaptureBitmap } = require('./app/ocr-preprocess');
 const { translateWord: deepSeekWord, translateSelection: deepSeekSelection } = require('./app/deepseek');
 const localTranslator = require('./app/local-translator');
 const {
@@ -758,7 +758,7 @@ async function captureAroundCursor(pointer) {
     height: Math.max(1, Math.round(cropHeight * scaleY))
   });
   const croppedSize = cropped.getSize();
-  const preprocessed = preprocessDarkBitmap(
+  const preprocessed = preprocessCaptureBitmap(
     cropped.toBitmap(),
     croppedSize.width,
     croppedSize.height
