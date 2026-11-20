@@ -551,19 +551,22 @@ func selectionOnElement(_ element: AXUIElement,
     var method = "selected-text"
     var markerRange: CFTypeRef?
     // Read the marker range even when AXSelectedText exists: some WebKit
-    // elements provide its text but no native AXSelectedTextRange geometry.
+    // elements provide its text without native AXSelectedTextRange geometry,
+    // and Chromium can return a truncated AXSelectedText when a selection spans
+    // separate DOM sections (e.g. a heading + following block) while the
+    // marker range still carries the full text.
     let rangeError = AXUIElementCopyAttributeValue(
         element, "AXSelectedTextMarkerRange" as CFString, &markerRange)
-    if raw?.isEmpty != false, rangeError == .success, let markerRange {
-        if CFGetTypeID(markerRange) == AXTextMarkerRangeGetTypeID() {
-            var markedText: CFTypeRef?
-            let markedError = AXUIElementCopyParameterizedAttributeValue(
-                element, "AXStringForTextMarkerRange" as CFString,
-                markerRange, &markedText)
-            if markedError == .success {
-                raw = markedText as? String
-                method = "text-marker"
-            }
+    if rangeError == .success, let markerRange,
+       CFGetTypeID(markerRange) == AXTextMarkerRangeGetTypeID() {
+        var markedText: CFTypeRef?
+        let markedError = AXUIElementCopyParameterizedAttributeValue(
+            element, "AXStringForTextMarkerRange" as CFString,
+            markerRange, &markedText)
+        if markedError == .success, let marked = markedText as? String,
+           !marked.isEmpty, marked.count > (raw?.count ?? 0) {
+            raw = marked
+            method = "text-marker"
         }
     }
     // Some Chromium accessibility trees expose the complete AXSelectedText but
