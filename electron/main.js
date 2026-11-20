@@ -1328,7 +1328,6 @@ function createTray() {
   }
   tray = new Tray(image);
   updateTrayMenu();
-  tray.on('click', toggleLens);
 }
 
 async function bootstrap() {
