@@ -144,6 +144,30 @@ async function openScreenPermissionSettings() {
   updateTrayMenu();
 }
 
+function accessibilityAccessGranted() {
+  if (process.platform !== 'darwin') return true;
+  try {
+    return Boolean(systemPreferences.isTrustedAccessibilityClient(false));
+  } catch {
+    return false;
+  }
+}
+
+async function openAccessibilityPermissionSettings() {
+  if (process.platform !== 'darwin') return;
+  try {
+    systemPreferences.isTrustedAccessibilityClient(true);
+  } catch { /* ignore prompt error */ }
+  try {
+    await shell.openExternal(
+      'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'
+    );
+  } catch (error) {
+    log.error('ACCESSIBILITY_PERMISSION_OPEN_ERROR=' + (error?.message || error));
+  }
+  updateTrayMenu();
+}
+
 async function openLogLocation() {
   fileLogger.touch();
   try {
@@ -1148,6 +1172,14 @@ function updateTrayMenu() {
       template.push({
         label: '屏幕录制：未授权 (点击授权)',
         click: openScreenPermissionSettings
+      });
+    }
+    if (accessibilityAccessGranted()) {
+      template.push({ label: '辅助功能（划选翻译）：已授权', enabled: false });
+    } else {
+      template.push({
+        label: '辅助功能（划选翻译）：未授权 (点击授权)',
+        click: openAccessibilityPermissionSettings
       });
     }
     template.push({ type: 'separator' });
