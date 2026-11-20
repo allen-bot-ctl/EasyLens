@@ -15,6 +15,7 @@ const execFileAsync = promisify(execFile);
 const { createSettingsStore } = require('./app/settings-store');
 const { createFileLogger } = require('./app/file-log');
 const { createOcrService, findFocus } = require('./app/ocr');
+const { preprocessDarkBitmap } = require('./app/ocr-preprocess');
 const { translateWord: deepSeekWord, translateSelection: deepSeekSelection } = require('./app/deepseek');
 const localTranslator = require('./app/local-translator');
 const {
@@ -216,11 +217,6 @@ function createLensWindow() {
   lensWindow.setAlwaysOnTop(true, 'screen-saver');
   lensWindow.setIgnoreMouseEvents(true, { forward: true });
   lensWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  if (process.platform === 'darwin') {
-    // Exclude the eye overlay from desktopCapturer (NSWindowSharingNone) so
-    // OCR sees unobstructed text under the pupil with zero window flicker.
-    lensWindow.setContentProtection(true);
-  }
   lensWindow.loadFile(path.join(__dirname, 'renderer', 'lens.html'));
   lensWindow.on('closed', () => { lensWindow = null; });
 }
@@ -253,9 +249,6 @@ function createCardWindow() {
   cardWindow.setAlwaysOnTop(true, 'screen-saver');
   cardWindow.setIgnoreMouseEvents(true, { forward: true });
   cardWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  if (process.platform === 'darwin') {
-    cardWindow.setContentProtection(true);
-  }
   cardWindow.loadFile(path.join(__dirname, 'renderer', 'card.html'));
   cardWindow.on('closed', () => { cardWindow = null; });
 }
@@ -764,7 +757,15 @@ async function captureAroundCursor(pointer) {
     width: Math.max(1, Math.round(cropWidth * scaleX)),
     height: Math.max(1, Math.round(cropHeight * scaleY))
   });
-  const image = cropped.toPNG();
+  const croppedSize = cropped.getSize();
+  const preprocessed = preprocessDarkBitmap(
+    cropped.toBitmap(),
+    croppedSize.width,
+    croppedSize.height
+  );
+  const image = preprocessed
+    ? nativeImage.createFromBitmap(preprocessed, croppedSize).toPNG()
+    : cropped.toPNG();
   if (process.env.EASYLENS_DEBUG_CAPTURE === '1') {
     const output = path.join(os.tmpdir(), 'easylens-capture.png');
     try { fs.writeFileSync(output, image); } catch { /* debug only */ }
