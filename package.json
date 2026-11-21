@@ -1,6 +1,6 @@
 {
   "name": "easylens",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "private": true,
   "description": "EasyLens: a tray eye lens that translates English under the cursor into Chinese.",
   "homepage": "https://allen-bot-ctl.github.io/EasyLens/",
@@ -52,7 +52,7 @@
       "category": "Utility",
       "executableName": "easylens",
       "artifactName": "EasyLens-${version}-linux-${arch}.${ext}",
-      "icon": "electron/assets/icon.png"
+      "icon": "build/icon.png"
     },
     "win": {
       "target": [
@@ -63,7 +63,8 @@
           ]
         }
       ],
-      "artifactName": "EasyLens-${version}-win-${arch}.${ext}"
+      "artifactName": "EasyLens-${version}-win-${arch}.${ext}",
+      "icon": "build/icon.png"
     },
     "mac": {
       "target": [
@@ -89,7 +90,8 @@
         "LSUIElement": true,
         "NSDesktopCaptureUsageDescription": "EasyLens 需要屏幕录制权限以识别鼠标指向的英文单词并进行翻译。",
         "NSScreenCaptureUsageDescription": "EasyLens 需要屏幕录制权限以识别鼠标指向的英文单词并进行翻译。"
-      }
+      },
+      "icon": "build/icon.png"
     }
   }
 }

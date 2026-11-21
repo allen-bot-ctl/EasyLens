@@ -198,6 +198,15 @@ jobs:
             app=$(find "$dir" -maxdepth 1 -type d -name '*.app' -print -quit)
             [ -n "$app" ] || { echo "::error::no .app under $dir"; exit 1; }
             echo "== $app"
+            icon=$(plutil -extract CFBundleIconFile raw "$app/Contents/Info.plist")
+            echo "RELEASE: icon=$icon"
+            case "$icon" in electron|electron.icns) echo "::error::$app still uses the default Electron icon"; exit 1;; esac
+            [ -f "$app/Contents/Resources/${icon%.icns}.icns" ] || { echo "::error::$app missing icon file $icon"; exit 1; }
+            rm -rf /tmp/appicon.iconset && iconutil -c iconset -o /tmp/appicon.iconset "$app/Contents/Resources/${icon%.icns}.icns"
+            ls /tmp/appicon.iconset
+            [ -f /tmp/appicon.iconset/icon_512x512@2x.png ] || { echo "::error::$app icon has no 1024px image"; exit 1; }
+            echo "RELEASE: icon 1024=$(sips -g pixelWidth /tmp/appicon.iconset/icon_512x512@2x.png | awk '/pixelWidth/{print $2}')"
+            if [ -f "$app/Contents/Resources/electron.icns" ] && cmp -s "$app/Contents/Resources/electron.icns" "$app/Contents/Resources/${icon%.icns}.icns"; then echo "::error::$app icon is the Electron default"; exit 1; fi
             main_bin="$app/Contents/MacOS/EasyLens"
             archs=$(lipo -archs "$main_bin")
             [ "$archs" = "$want" ] || { echo "::error::$app archs=$archs, expected $want"; exit 1; }

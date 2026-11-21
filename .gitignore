@@ -25,5 +25,7 @@ electron/bin/macos-selection-reader
 dist/
 build/*
 !build/expected-designated.txt
+!build/icon.png
+!build/icon-src/
 out/
 coverage/
