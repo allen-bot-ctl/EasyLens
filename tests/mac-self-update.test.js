@@ -292,10 +292,14 @@ test('compareSemver orders versions and rejects invalid values', () => {
 
 test('deriveDmgUrl builds the direct DMG asset URL', () => {
   assert.equal(
-    deriveDmgUrl(NEXT_VERSION),
+    deriveDmgUrl(NEXT_VERSION, 'x64'),
     `https://github.com/allen-bot-ctl/EasyLens/releases/download/v${NEXT_VERSION}/EasyLens-${NEXT_VERSION}-mac-x64.dmg`
   );
-  assert.equal(deriveDmgUrl(`v${NEXT_VERSION}`), deriveDmgUrl(NEXT_VERSION));
+  assert.equal(
+    deriveDmgUrl(NEXT_VERSION, 'arm64'),
+    `https://github.com/allen-bot-ctl/EasyLens/releases/download/v${NEXT_VERSION}/EasyLens-${NEXT_VERSION}-mac-arm64.dmg`
+  );
+  assert.equal(deriveDmgUrl(`v${NEXT_VERSION}`, 'x64'), deriveDmgUrl(NEXT_VERSION, 'x64'));
   assert.equal(deriveDmgUrl('0.1'), null);
   assert.equal(deriveDmgUrl(''), null);
 });
@@ -578,7 +582,7 @@ test('install script is static, positional and contains wait plus rollback', () 
   );
 });
 
-test('install script passes /bin/sh syntax check', (t) => {
+test('install script passes /bin/sh syntax check', { skip: process.platform === 'win32' && '/bin/sh 不存在于 Windows' }, (t) => {
   const dir = tempDir(t);
   const scriptPath = path.join(dir, 'update-install.sh');
   fs.writeFileSync(scriptPath, INSTALL_SCRIPT, { mode: 0o700 });
