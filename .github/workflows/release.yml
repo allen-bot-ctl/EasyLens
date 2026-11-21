@@ -13,8 +13,41 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 0.1.9 契约：发版说明必须来自 release-notes/<tag>.md，缺文件就失败；
+  # tag 只能打在 feat/gbot 的提交上（master 是 Swift 原型，不能让更新源拿到它）。
+  preflight:
+    name: Check release notes and branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Release notes must exist
+        run: |
+          set -euo pipefail
+          NOTES="release-notes/${GITHUB_REF_NAME}.md"
+          [ -s "$NOTES" ] || { echo "::error::缺少发版说明 $NOTES"; exit 1; }
+          echo "RELEASE: notes=$NOTES"
+
+      - name: Tag must be on feat/gbot
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin feat/gbot
+          git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD \
+            || { echo "::error::tag ${GITHUB_REF_NAME} 不在 feat/gbot 上"; exit 1; }
+          echo "RELEASE: branch=feat/gbot"
+
+      - name: Tag must match package.json version
+        run: |
+          set -euo pipefail
+          v=$(node -p 'require("./package.json").version')
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "::error::package.json $v 与 tag $GITHUB_REF_NAME 不一致"; exit 1; }
+
   linux:
     name: Build Linux x86_64 packages
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -58,6 +91,7 @@ jobs:
 
   windows:
     name: Build Windows x64 installer
+    needs: preflight
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -90,7 +124,9 @@ jobs:
 
   macos:
     name: Build macOS Intel and Apple Silicon packages
+    needs: preflight
     runs-on: macos-latest
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -107,6 +143,31 @@ jobs:
       - name: Run tests
         run: npm test
 
+      # 0.1.9：固定自签证书「EasyLens Self-Signed」（照搬栏历 0.1.52）。p12 只在 Secrets 里。
+      - name: Import stable signing certificate
+        shell: bash
+        env:
+          EASYLENS_SIGN_P12: ${{ secrets.EASYLENS_SIGN_P12 }}
+          EASYLENS_SIGN_PASSWORD: ${{ secrets.EASYLENS_SIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [ -n "$EASYLENS_SIGN_P12" ] || { echo "::error::EASYLENS_SIGN_P12 secret missing"; exit 1; }
+          kc="$RUNNER_TEMP/easylens-sign.keychain-db"
+          kcpass=$(openssl rand -hex 16)
+          echo "$EASYLENS_SIGN_P12" | base64 --decode > "$RUNNER_TEMP/easylens-sign.p12"
+          security create-keychain -p "$kcpass" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kcpass" "$kc"
+          security import "$RUNNER_TEMP/easylens-sign.p12" -k "$kc" -P "$EASYLENS_SIGN_PASSWORD" -T /usr/bin/codesign -f pkcs12
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpass" "$kc" >/dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          openssl pkcs12 -in "$RUNNER_TEMP/easylens-sign.p12" -nokeys -passin env:EASYLENS_SIGN_PASSWORD -legacy -out "$RUNNER_TEMP/easylens-sign.pem" 2>/dev/null \
+            || openssl pkcs12 -in "$RUNNER_TEMP/easylens-sign.p12" -nokeys -passin env:EASYLENS_SIGN_PASSWORD -out "$RUNNER_TEMP/easylens-sign.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/easylens-sign.pem"
+          rm -f "$RUNNER_TEMP/easylens-sign.p12"
+          security find-identity -p codesigning "$kc"
+          echo "EASYLENS_SIGN_KEYCHAIN=$kc" >> "$GITHUB_ENV"
+
       - name: Build macOS selection reader (universal)
         run: |
           mkdir -p electron/bin
@@ -115,12 +176,54 @@ jobs:
           swiftc -O -target x86_64-apple-macos13.0 $SOURCES -o electron/bin/macos-selection-reader-x64
           lipo -create electron/bin/macos-selection-reader-arm64 electron/bin/macos-selection-reader-x64 -output electron/bin/macos-selection-reader
           rm -f electron/bin/macos-selection-reader-arm64 electron/bin/macos-selection-reader-x64
-          codesign --force --sign - electron/bin/macos-selection-reader
+          codesign --force --sign "EasyLens Self-Signed" --timestamp=none --keychain "$EASYLENS_SIGN_KEYCHAIN" electron/bin/macos-selection-reader
+          codesign -dv electron/bin/macos-selection-reader 2>&1 | grep "Authority=EasyLens Self-Signed"
 
-      # Ad-hoc signing ("identity": null in package.json) is required so Release
-      # dmg/app are signed and the TCC CDHash does not go unsigned across updates.
+      # identity "-" 让 electron-builder 先做临时签名，afterSign 钩子 scripts/stable-sign.js
+      # 再用固定证书重签 reader 和整个 .app（x64、arm64 各一次），然后才打 dmg/zip。
       - name: Build macOS dmg and zip for x64 and arm64
         run: npx electron-builder --mac dmg zip --x64 --arm64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          EASYLENS_SIGN_IDENTITY: "EasyLens Self-Signed"
+
+      - name: Verify stable signature (x64 and arm64)
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=$(cat build/expected-designated.txt)
+          for pair in "mac:x86_64" "mac-arm64:arm64"; do
+            dir="dist/${pair%%:*}"; want="${pair##*:}"
+            app=$(find "$dir" -maxdepth 1 -type d -name '*.app' -print -quit)
+            [ -n "$app" ] || { echo "::error::no .app under $dir"; exit 1; }
+            echo "== $app"
+            main_bin="$app/Contents/MacOS/EasyLens"
+            archs=$(lipo -archs "$main_bin")
+            [ "$archs" = "$want" ] || { echo "::error::$app archs=$archs, expected $want"; exit 1; }
+            codesign -dv --verbose=2 "$app" 2>&1 | tee /tmp/codesign.log
+            grep -q "Authority=EasyLens Self-Signed" /tmp/codesign.log || { echo "::error::$app not signed by EasyLens Self-Signed"; exit 1; }
+            if grep -q "Signature=adhoc" /tmp/codesign.log; then echo "::error::$app still ad-hoc"; exit 1; fi
+            codesign -d -r- "$app" 2>&1 | tee /tmp/dr.txt
+            actual=$(grep -o 'designated => .*' /tmp/dr.txt | sed 's/^designated => //')
+            [ "$actual" = "$expected" ] || { echo "::error::designated mismatch for $app"; echo "expected: $expected"; echo "actual:   $actual"; exit 1; }
+            codesign --verify --deep --strict "$app"
+            reader="$app/Contents/Resources/app/electron/bin/macos-selection-reader"
+            [ -f "$reader" ] || { echo "::error::missing $reader"; exit 1; }
+            codesign -dv "$reader" 2>&1 | tee /tmp/reader.log
+            grep -q "Authority=EasyLens Self-Signed" /tmp/reader.log || { echo "::error::selection-reader not signed by EasyLens Self-Signed"; exit 1; }
+            echo "RELEASE: $want designated=$actual"
+          done
+          echo "RELEASE: codesign=stable x64+arm64"
+
+      - name: Generate zip checksums for in-app update
+        run: |
+          set -euo pipefail
+          cd dist
+          for arch in x64 arm64; do
+            f=$(ls EasyLens-*-mac-$arch.zip)
+            shasum -a 256 "$f" > "$f.sha256"
+            cat "$f.sha256"
+          done
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
@@ -130,6 +233,7 @@ jobs:
           path: |
             dist/EasyLens-*-mac-*.dmg
             dist/EasyLens-*-mac-*.zip
+            dist/EasyLens-*-mac-*.zip.sha256
 
   publish:
     name: Publish GitHub Release
@@ -139,6 +243,11 @@ jobs:
       - macos
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout release notes
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: release-notes
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -148,61 +257,29 @@ jobs:
       - name: List release files
         run: ls -lh dist
 
+      - name: Prepare release notes
+        id: notes
+        run: |
+          set -euo pipefail
+          NOTES="release-notes/${GITHUB_REF_NAME}.md"
+          [ -s "$NOTES" ] || { echo "::error::缺少发版说明 $NOTES"; exit 1; }
+          echo "path=$NOTES" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: EasyLens ${{ github.ref_name }}
-          body: |
-            ## EasyLens ${{ github.ref_name }}
-
-            本次发布包含 Linux x86_64、Windows x64、macOS Intel（x64）和 macOS Apple Silicon（arm64）构建。
-
-            ### Linux（x86_64）
-
-            - `EasyLens-*-linux-x64.AppImage`：直接运行的 AppImage。下载后执行 `chmod +x EasyLens-*-linux-x64.AppImage`，再运行该文件。
-            - `EasyLens-*-linux-x64-dir.zip`：解压后的目录包，适合没有 AppImage 运行时的环境。解压后运行目录内的 `easylens`。
-
-            ### Windows（x64）
-
-            - `EasyLens-*-win-x64.exe`：NSIS 安装包，仅支持 64 位 Windows。
-            - 安装包未签名。Windows SmartScreen 可能提示“已保护你的电脑”，需要点击“更多信息”，再选择“仍要运行”。
-
-            ### macOS Intel（x64）
-
-            - `EasyLens-*-mac-x64.dmg`：推荐下载，打开后把 EasyLens 拖入“应用程序”。
-            - `EasyLens-*-mac-x64.zip`：备用压缩包，解压后得到 `EasyLens.app`。
-
-            ### macOS Apple Silicon（arm64，M 系列芯片）
-
-            - `EasyLens-*-mac-arm64.dmg`：推荐下载，打开后把 EasyLens 拖入“应用程序”。
-            - `EasyLens-*-mac-arm64.zip`：备用压缩包，解压后得到 `EasyLens.app`。
-
-            ### macOS ad-hoc 签名说明
-
-            当前没有 Apple Developer 证书，macOS 包使用 ad-hoc 签名，未使用 Developer ID 且未公证。Gatekeeper 可能阻止首次打开：
-            在“系统设置 → 隐私与安全性”中选择“仍要打开”，或右键点击 EasyLens 后选择“打开”。
-
-            **升级后若提示“屏幕录制：未授权”但系统设置里开关仍亮着**：因为 ad-hoc 签名每次发版都会更换 `CDHash`，直接开关蓝条不会刷新 TCC 记录。请先选中 EasyLens 点左下角 **`-`** 移除（或在终端执行 `tccutil reset ScreenCapture ai.nangua.EasyLens`），再点 **`+`** 重新添加 `/Applications/EasyLens.app` 并重启应用。
-
-            ### 使用
-
-            - 启动后驻留系统托盘，不创建常驻主窗口。
-            - `Ctrl+Alt+L`：显示或隐藏跟随鼠标的透明眼睛；`Esc`：隐藏。
-            - 鼠标停在英文上查看中文。内置约 26,282 条离线英汉词条，屏幕文字使用本机 OCR，选区包含焦点词时优先翻译完整选区。
-            - 托盘菜单「设置…」可以选择离线词典或 DeepSeek，并配置接口、模型和 API Key。
-
-            ### 说明
-
-            - Windows 构建未做代码签名；macOS 构建仅使用 ad-hoc 签名，所有平台均未公证。Windows SmartScreen 与 macOS Gatekeeper 可能要求用户手动允许。
-            - `Sources/EasyLens/` 中的 macOS Swift 工程仅作参考，需要 Xcode 构建，不是当前默认分发形式。
-            - 发布包不包含 API Key、`.env` 或用户主目录配置；DeepSeek 密钥只保存在用户本机的 `~/.easylens/`。
-            - 默认不持久化截图。启用 DeepSeek 时只发送待译文字，不发送截图。
+          body_path: ${{ steps.notes.outputs.path }}
           files: |
             dist/*.AppImage
             dist/EasyLens-*-linux-*-dir.zip
             dist/EasyLens-*-win-*.exe
-            dist/EasyLens-*-mac-*.dmg
-            dist/EasyLens-*-mac-*.zip
+            dist/EasyLens-*-mac-x64.dmg
+            dist/EasyLens-*-mac-x64.zip
+            dist/EasyLens-*-mac-x64.zip.sha256
+            dist/EasyLens-*-mac-arm64.dmg
+            dist/EasyLens-*-mac-arm64.zip
+            dist/EasyLens-*-mac-arm64.zip.sha256
           fail_on_unmatched_files: true
           draft: false
           prerelease: false

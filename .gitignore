@@ -23,6 +23,7 @@ tmp/
 electron/bin/macos-selection-reader
 .build/
 dist/
-build/
+build/*
+!build/expected-designated.txt
 out/
 coverage/

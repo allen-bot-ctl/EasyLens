@@ -2,7 +2,8 @@
 
 const {
   app, BrowserWindow, Tray, Menu, globalShortcut, screen, desktopCapturer,
-  ipcMain, nativeImage, clipboard, dialog, shell, systemPreferences
+  ipcMain, nativeImage, clipboard, dialog, shell, systemPreferences,
+  net, Notification
 } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
@@ -14,6 +15,10 @@ const execFileAsync = promisify(execFile);
 
 const { createSettingsStore } = require('./app/settings-store');
 const { createFileLogger } = require('./app/file-log');
+const { setupAutoUpdate } = require('./updater');
+const { createMacSelfUpdater, deriveDmgUrl, extractVersion } = require('./mac-self-update');
+const { describeTray, shouldKeepPrevious } = require('./update-status');
+const { GITHUB_OWNER, GITHUB_REPO, RELEASES_LATEST_URL } = require('./update-feed');
 const { createOcrService, findFocus } = require('./app/ocr');
 const { preprocessCaptureBitmap } = require('./app/ocr-preprocess');
 const { translateWord: deepSeekWord, translateSelection: deepSeekSelection } = require('./app/deepseek');
@@ -84,6 +89,9 @@ let ocrService = null;
 let tickTimer = null;
 let loadingTimer = null;
 let quitting = false;
+let updater = null;
+let selfUpdater = null;
+let updateStatus = { state: 'idle' };
 
 const state = {
   visible: false,
@@ -1252,6 +1260,9 @@ function updateTrayMenu() {
       enabled: false
     },
     { type: 'separator' },
+    updateEntryMenuItem(),
+    { label: `版本 ${app.getVersion()}`, enabled: false },
+    { type: 'separator' },
     {
       label: '关于 EasyLens',
       click: () => {
@@ -1272,9 +1283,178 @@ function updateTrayMenu() {
       click: () => app.quit()
     }
   );
+  const updateTop = describeTray(updateStatus, { currentVersion: app.getVersion() }).top;
+  if (updateTop) {
+    template.unshift(
+      { label: updateTop.label, click: installReadyUpdate },
+      { type: 'separator' }
+    );
+  }
   const menu = Menu.buildFromTemplate(template);
   tray.setContextMenu(menu);
   tray.setToolTip(state.visible ? 'EasyLens · 眼睛已显示' : 'EasyLens');
+}
+
+// ---- 0.1.9 应用内升级（契约 docs/changes/0.1.9-in-app-update.md） ----
+
+const ALLOWED_UPDATE_PREFIX = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/`;
+
+function isAllowedUpdateUrl(value) {
+  return typeof value === 'string' && value.startsWith(ALLOWED_UPDATE_PREFIX);
+}
+
+function openUpdateUrl(url) {
+  const target = isAllowedUpdateUrl(url) ? url : RELEASES_LATEST_URL;
+  log('UPDATE open ' + target);
+  shell.openExternal(target).catch((error) => log.warn('UPDATE open failed', error.message));
+}
+
+function updateEntryMenuItem() {
+  const view = describeTray(updateStatus, { currentVersion: app.getVersion() });
+  const entry = view.entry;
+  if (entry.action === 'check') {
+    return { label: entry.label, click: () => requestUpdateCheck() };
+  }
+  if (entry.action === 'open') {
+    return { label: entry.label, click: () => openUpdateUrl(entry.url) };
+  }
+  return { label: entry.label, enabled: false };
+}
+
+function notifiedFile() {
+  return path.join(app.getPath('userData'), 'update-notified.json');
+}
+
+function hasUpdateNotification(key) {
+  try {
+    const data = JSON.parse(fs.readFileSync(notifiedFile(), 'utf8'));
+    return Boolean(data && data[key]);
+  } catch {
+    return false;
+  }
+}
+
+function markUpdateNotification(key) {
+  let data = {};
+  try {
+    data = JSON.parse(fs.readFileSync(notifiedFile(), 'utf8')) || {};
+  } catch {
+    data = {};
+  }
+  data[key] = new Date().toISOString();
+  try {
+    fs.mkdirSync(path.dirname(notifiedFile()), { recursive: true });
+    fs.writeFileSync(notifiedFile(), JSON.stringify(data));
+  } catch (error) {
+    log.warn('UPDATE notified write failed', error.message);
+  }
+}
+
+function notifyUpdate(text) {
+  if (!text) return;
+  log('UPDATE notify ' + text);
+  try {
+    if (Notification.isSupported()) {
+      new Notification({ title: 'EasyLens', body: text, silent: false }).show();
+    }
+  } catch (error) {
+    log.warn('UPDATE notification failed', error.message);
+  }
+}
+
+function handleUpdateStatus(status) {
+  if (shouldKeepPrevious(updateStatus, status)) {
+    log('UPDATE keep ready; ignored automatic ' + status.state);
+    return;
+  }
+  updateStatus = status;
+  const view = describeTray(status, { currentVersion: app.getVersion() });
+  log('UPDATE state=' + view.state + (status.manual ? ' manual' : ' auto') +
+    (status.reason ? ' reason=' + status.reason : ''));
+  updateTrayMenu();
+  if (view.notifyOnce) {
+    if (!hasUpdateNotification(view.notifyOnce)) {
+      markUpdateNotification(view.notifyOnce);
+      notifyUpdate(view.notification);
+    }
+  } else if (view.notification) {
+    notifyUpdate(view.notification);
+  }
+  if (view.openUrl) openUpdateUrl(view.openUrl);
+}
+
+function requestUpdateCheck() {
+  if (!updater) {
+    handleUpdateStatus({ state: 'error', manual: true, reason: 'updater-unavailable' });
+    return;
+  }
+  updater.checkNow({ manual: true });
+}
+
+function installReadyUpdate() {
+  if (!selfUpdater) {
+    handleUpdateStatus({ state: 'manual', manual: true, name: updateStatus.name, url: updateStatus.url });
+    return;
+  }
+  let outcome;
+  try {
+    outcome = selfUpdater.installReady();
+  } catch (error) {
+    outcome = { ok: false, reason: error.message || String(error) };
+  }
+  if (!outcome || !outcome.ok) {
+    log.warn('UPDATE install failed ' + (outcome && outcome.reason));
+    // 自更新失败：回退为「下载新版本」，并打开本机芯片对应的 dmg。
+    const version = extractVersion(updateStatus.name);
+    handleUpdateStatus({
+      state: 'manual',
+      manual: true,
+      name: updateStatus.name,
+      url: deriveDmgUrl(version, process.arch) || RELEASES_LATEST_URL,
+      reason: outcome && outcome.reason
+    });
+  }
+}
+
+function setupUpdates() {
+  const logger = (message) => log('UPDATE ' + message);
+  try {
+    selfUpdater = createMacSelfUpdater({
+      platform: process.platform,
+      arch: process.arch,
+      isPackaged: app.isPackaged === true,
+      appVersion: app.getVersion(),
+      execPath: process.execPath,
+      fs: require('original-fs'),
+      fetch: (url, init) => net.fetch(url, init),
+      getLogsPath: () => app.getPath('logs'),
+      pid: process.pid,
+      // 安装脚本已脱离进程运行；app.quit() 3 秒内没退干净就强制退出。
+      quit: () => {
+        setTimeout(() => app.exit(0), 3000).unref();
+        app.quit();
+      },
+      logger
+    });
+  } catch (error) {
+    selfUpdater = null;
+    log.warn('UPDATE self-updater init failed', error.message);
+  }
+  try {
+    updater = setupAutoUpdate({
+      app,
+      net,
+      selfUpdate: selfUpdater,
+      onStatus: handleUpdateStatus,
+      isNotified: hasUpdateNotification,
+      markNotified: markUpdateNotification,
+      logger
+    });
+    log('UPDATE mode=' + updater.mode + ' feed=' + (updater.feedUrl || '-'));
+  } catch (error) {
+    updater = null;
+    log.error('UPDATE init failed', error.message);
+  }
 }
 
 function showSettings() {
@@ -1386,6 +1566,7 @@ async function bootstrap() {
   createLensWindow();
   createCardWindow();
   createTray();
+  setupUpdates();
 
   // Electron maps Alt to Option on macOS, so Control+Alt+L covers ⌃⌥L across
   // all platforms without triggering a duplicate-registration error.
@@ -1438,6 +1619,10 @@ if (!lock) {
 
   app.on('before-quit', () => {
     quitting = true;
+    if (updater) {
+      updater.stop();
+      updater = null;
+    }
     stopTick();
     // lensWindow and cardWindow use closable: false, which makes macOS refuse
     // to close them and abort app.quit() / "Quit & Reopen" in System Settings.
