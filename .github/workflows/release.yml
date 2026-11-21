@@ -177,7 +177,8 @@ jobs:
           lipo -create electron/bin/macos-selection-reader-arm64 electron/bin/macos-selection-reader-x64 -output electron/bin/macos-selection-reader
           rm -f electron/bin/macos-selection-reader-arm64 electron/bin/macos-selection-reader-x64
           codesign --force --sign "EasyLens Self-Signed" --timestamp=none --keychain "$EASYLENS_SIGN_KEYCHAIN" electron/bin/macos-selection-reader
-          codesign -dv electron/bin/macos-selection-reader 2>&1 | grep "Authority=EasyLens Self-Signed"
+          codesign -dv --verbose=2 electron/bin/macos-selection-reader 2>&1 | tee /tmp/reader-src.log
+          grep -q "Authority=EasyLens Self-Signed" /tmp/reader-src.log || { echo "::error::selection-reader not signed by EasyLens Self-Signed"; exit 1; }
 
       # identity "-" 让 electron-builder 先做临时签名，afterSign 钩子 scripts/stable-sign.js
       # 再用固定证书重签 reader 和整个 .app（x64、arm64 各一次），然后才打 dmg/zip。
@@ -209,7 +210,7 @@ jobs:
             codesign --verify --deep --strict "$app"
             reader="$app/Contents/Resources/app/electron/bin/macos-selection-reader"
             [ -f "$reader" ] || { echo "::error::missing $reader"; exit 1; }
-            codesign -dv "$reader" 2>&1 | tee /tmp/reader.log
+            codesign -dv --verbose=2 "$reader" 2>&1 | tee /tmp/reader.log
             grep -q "Authority=EasyLens Self-Signed" /tmp/reader.log || { echo "::error::selection-reader not signed by EasyLens Self-Signed"; exit 1; }
             echo "RELEASE: $want designated=$actual"
           done
