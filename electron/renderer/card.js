@@ -33,6 +33,10 @@ window.easylens.onCardShow((payload) => {
   requestAnimationFrame(() => requestAnimationFrame(measureAndResize));
 });
 
+window.easylens.onCardHide(() => {
+  loading.hidden = true;
+});
+
 window.addEventListener('resize', () => {
   // The window size is driven by the content; avoid a feedback loop by only
   // re-measuring when the text actually overflows the current width.

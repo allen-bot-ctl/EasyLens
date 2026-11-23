@@ -102,3 +102,75 @@ test('redraw is a no-op while suppressed', () => {
   assert.equal(harness.draws, 0);
   assert.equal(harness.pending(), 0);
 });
+
+test('0.1.14: hidden lens draws zero frames within 2 seconds (real timers)', async () => {
+  let draws = 0;
+  const scheduler = createLensScheduler({
+    drawFrame: () => { draws += 1; },
+    requestFrame: (callback) => setTimeout(callback, 16),
+    cancelFrame: (id) => clearTimeout(id)
+  });
+  scheduler.ensureRendering();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.ok(draws > 3, 'visible lens should animate');
+
+  scheduler.sleep();
+  const before = draws;
+  // Wake signals that are not an explicit show must not restart the loop.
+  scheduler.setSuppressed(false);
+  scheduler.ensureRendering();
+  scheduler.redraw();
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+  assert.equal(draws - before, 0);
+  assert.equal(scheduler.hasPendingFrame(), false);
+  assert.equal(scheduler.isRendering(), false);
+
+  scheduler.wake();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.ok(draws - before > 3, 'lens animates again after wake');
+  scheduler.stop();
+});
+
+test('0.1.14: lens created asleep schedules nothing until woken', () => {
+  const harness = createHarnessAsleep();
+  harness.scheduler.ensureRendering();
+  harness.scheduler.setSuppressed(false);
+  assert.equal(harness.pending(), 0);
+  assert.equal(harness.draws, 0);
+  harness.scheduler.wake();
+  assert.equal(harness.draws, 1);
+  assert.equal(harness.pending(), 1);
+  harness.flush();
+  assert.equal(harness.draws, 2);
+  harness.scheduler.sleep();
+  assert.equal(harness.pending(), 0);
+  harness.flush();
+  assert.equal(harness.draws, 2);
+});
+
+function createHarnessAsleep() {
+  let nextFrameId = 1;
+  let draws = 0;
+  const pendingFrames = new Map();
+  const scheduler = createLensScheduler({
+    startAsleep: true,
+    drawFrame: () => { draws += 1; },
+    requestFrame(callback) {
+      const id = nextFrameId;
+      nextFrameId += 1;
+      pendingFrames.set(id, callback);
+      return id;
+    },
+    cancelFrame(id) { pendingFrames.delete(id); }
+  });
+  return {
+    scheduler,
+    get draws() { return draws; },
+    pending() { return pendingFrames.size; },
+    flush() {
+      const callbacks = [...pendingFrames.values()];
+      pendingFrames.clear();
+      callbacks.forEach((callback) => callback());
+    }
+  };
+}

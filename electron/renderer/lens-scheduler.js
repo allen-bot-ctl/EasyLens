@@ -18,17 +18,20 @@
 
     let suppressed = false;
     let rendering = false;
+    // Asleep means the lens window is hidden: no frame may be drawn or
+    // scheduled until the main process explicitly wakes the lens again.
+    let asleep = Boolean(settings.startAsleep);
     let rafId = null;
 
     function requestNextFrame() {
-      if (!rendering || rafId !== null) return false;
+      if (asleep || !rendering || rafId !== null) return false;
       rafId = requestFrame(tick);
       return true;
     }
 
     function tick() {
       rafId = null;
-      if (!rendering) return;
+      if (asleep || !rendering) return;
       try {
         if (!suppressed) drawFrame();
       } finally {
@@ -39,6 +42,7 @@
     }
 
     function ensureRendering() {
+      if (asleep) return false;
       rendering = true;
       return requestNextFrame();
     }
@@ -52,7 +56,7 @@
     }
 
     function redraw() {
-      if (suppressed) return false;
+      if (asleep || suppressed) return false;
       drawFrame();
       return true;
     }
@@ -67,9 +71,24 @@
       }
     }
 
+    function sleep() {
+      asleep = true;
+      suppressed = false;
+      stop();
+    }
+
+    function wake() {
+      asleep = false;
+      ensureRendering();
+      return redraw();
+    }
+
     return {
       ensureRendering,
       stop,
+      sleep,
+      wake,
+      isAsleep: () => asleep,
       redraw,
       setSuppressed,
       isRendering: () => rendering,

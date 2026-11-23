@@ -324,6 +324,14 @@ function sendLensResume() {
   }
 }
 
+function sleepLensRenderer() {
+  // Hidden lens: stop the renderer's animation loop completely so an idle
+  // EasyLens uses no CPU/GPU (lens window has backgroundThrottling off).
+  if (lensWindow && !lensWindow.isDestroyed()) {
+    lensWindow.webContents.send('lens:sleep');
+  }
+}
+
 function resumeLensRenderer() {
   // `lens:suppress false` restores opacity and re-arms the scheduler; the
   // explicit resume event also recovers a renderer whose rAF loop went idle.
@@ -334,6 +342,10 @@ function resumeLensRenderer() {
 function hideCard() {
   if (cardWindow && !cardWindow.isDestroyed() && cardWindow.isVisible()) {
     cardWindow.hide();
+  }
+  if (cardWindow && !cardWindow.isDestroyed()) {
+    // Stops the infinite loading-dots animation in the hidden card.
+    cardWindow.webContents.send('card:hide');
   }
   sendLens({ translated: false });
 }
@@ -461,7 +473,7 @@ function hideLens() {
   state.generation += 1;
   state.inspectedGeneration = -1;
   resetFocusState();
-  suppressLens(false);
+  sleepLensRenderer();
   if (lensWindow && !lensWindow.isDestroyed()) lensWindow.hide();
   stopTick();
   unregisterEscape();
@@ -1538,6 +1550,8 @@ function registerIpc() {
   ipcMain.on('lens:ready', () => {
     sendLens({ translated: false, reading: false });
     suppressLens(false);
+    // The renderer starts asleep; only wake it if the lens is already shown.
+    if (state.visible) sendLensResume();
   });
 }
 

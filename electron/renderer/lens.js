@@ -203,7 +203,11 @@ function draw() {
   }
 }
 
-const scheduler = window.EasyLensLensScheduler.createLensScheduler({ drawFrame: draw });
+const scheduler = window.EasyLensLensScheduler.createLensScheduler({
+  drawFrame: draw,
+  // The lens window starts hidden; stay idle until main shows it.
+  startAsleep: true
+});
 
 function wakeRenderer() {
   scheduler.ensureRendering();
@@ -224,7 +228,12 @@ window.easylens.onLensSuppress((value) => {
 });
 
 window.easylens.onLensResume(() => {
-  wakeRenderer();
+  scheduler.wake();
+});
+
+window.easylens.onLensSleep(() => {
+  canvas.style.opacity = '1';
+  scheduler.sleep();
 });
 
 document.addEventListener('visibilitychange', () => {
