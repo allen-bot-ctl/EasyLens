@@ -143,6 +143,11 @@ jobs:
       - name: Run tests
         run: npm test
 
+      # 0.1.14 契约 P1/P3：真 Electron 里眼睛收起后 3 秒绘制 0 帧，再唤出 200ms 内恢复。
+      - name: Idle frame test (real Electron)
+        timeout-minutes: 3
+        run: sh scripts/idle-frame-test.sh
+
       # 0.1.9：固定自签证书「EasyLens Self-Signed」（照搬栏历 0.1.52）。p12 只在 Secrets 里。
       - name: Import stable signing certificate
         shell: bash

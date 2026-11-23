@@ -54,6 +54,7 @@ const LENS_WIDTH = 190;
 const LENS_HEIGHT = 114;
 const SHOW_ON_LAUNCH = process.argv.includes('--show-on-launch');
 const SMOKE_TEST = process.argv.includes('--smoke-test');
+const IDLE_FRAME_TEST = process.argv.includes('--idle-frame-test');
 const FIXED_POINT = parseFixedPoint();
 
 function parseFixedPoint() {
@@ -1596,6 +1597,10 @@ async function bootstrap() {
   log('EASYLENS_READY platform=' + process.platform + ' electron=' + process.versions.electron);
   log('TRANSLATION_PROVIDER=' + settingsStore.getPublic().provider + ' screenshots_saved=0');
 
+  if (IDLE_FRAME_TEST) {
+    runIdleFrameTest();
+    return;
+  }
   if (SHOW_ON_LAUNCH || SMOKE_TEST) {
     showLens();
   }
@@ -1607,6 +1612,45 @@ async function bootstrap() {
       app.quit();
     }, 2600);
   }
+}
+
+// 0.1.14 contract P1/P3: real Electron check that a hidden lens draws zero
+// frames and that showing it again resumes drawing right away.
+async function runIdleFrameTest() {
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const frames = () => lensWindow.webContents.executeJavaScript('window.__easylensFrames');
+  const results = [];
+  try {
+    await wait(1500);
+    const atLaunch = await frames();
+    await wait(1000);
+    const launchIdle = (await frames()) - atLaunch;
+    results.push(['P0 never-shown lens idle 1s frames', launchIdle, launchIdle === 0]);
+    showLens();
+    await wait(1000);
+    const a = await frames();
+    await wait(1000);
+    const shownFps = (await frames()) - a;
+    results.push(['P3 shown lens frames/1s', shownFps, shownFps >= 30]);
+    hideLens();
+    await wait(300);
+    const h = await frames();
+    await wait(3000);
+    const hiddenFrames = (await frames()) - h;
+    results.push(['P1 hidden lens frames/3s', hiddenFrames, hiddenFrames === 0]);
+    const s0 = await frames();
+    showLens();
+    await wait(200);
+    const resumed = (await frames()) - s0;
+    results.push(['P3 frames within 200ms of reshow', resumed, resumed > 0]);
+    hideLens();
+  } catch (error) {
+    results.push(['error ' + error.message, 0, false]);
+  }
+  const ok = results.every((item) => item[2]);
+  results.forEach(([name, value, pass]) => log(`IDLE_FRAME ${pass ? 'PASS' : 'FAIL'} ${name}=${value}`));
+  log(ok ? 'IDLE_FRAME_TEST_OK' : 'IDLE_FRAME_TEST_FAIL');
+  app.exit(ok ? 0 : 1);
 }
 
 const lock = app.requestSingleInstanceLock();

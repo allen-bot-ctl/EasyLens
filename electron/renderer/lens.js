@@ -203,8 +203,15 @@ function draw() {
   }
 }
 
+// Test hook (0.1.14 contract P1/P3): count every frame actually drawn.
+window.__easylensFrames = 0;
+function countedDraw() {
+  window.__easylensFrames += 1;
+  draw();
+}
+
 const scheduler = window.EasyLensLensScheduler.createLensScheduler({
-  drawFrame: draw,
+  drawFrame: countedDraw,
   // The lens window starts hidden; stay idle until main shows it.
   startAsleep: true
 });
