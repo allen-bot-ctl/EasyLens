@@ -29,7 +29,7 @@ jobs:
 
   publish:
     needs: validate
-    if: false && needs.validate.outputs.mode == 'publish'
+    if: needs.validate.outputs.mode == 'publish'
     runs-on: ubuntu-latest
     permissions:
       contents: write
