@@ -7,9 +7,9 @@
 - 正式源码在 `electron/`，入口与脚本定义在 `package.json`；Electron 主进程在 `electron/main.js`。
 - Linux 托盘应用：托盘与全局快捷键、透明跟随鼠标的眼睛、`desktopCapturer` 取像、Tesseract.js OCR、PRIMARY/剪贴板选区回退、内置英汉词典英译中，以及可选的 DeepSeek 远端翻译。
 - `npm start` 只驻留托盘，`npm run start:show` 启动后显示眼睛；`npm test` 执行纯逻辑与存储测试，`npm run test:ocr` 验证随包 OCR 数据，`npm run build` 生成 `dist/linux-unpacked/`，`npm run smoke` 在 Xvfb 中启动真实进程做冒烟检查。
-- `Sources/EasyLens/`、`Package.swift`、`Resources/Info.plist` 和原构建脚本保留为 macOS 15+ Swift 原型，需要 Xcode 才能构建，不是默认入口。
+- `Sources/EasyLens/`、`Package.swift`、`Resources/Info.plist` 和原构建脚本保留为 macOS 15+ Swift 原型，需要 Xcode 才能构建，不是默认入口；其中 SelectionReader.swift 和 FocusText.swift 仍用于 Electron 的 macOS 划选助手，不能连同原型一起移除。
 - `tmp/scripts/` 和 `tmp/docs/` 保留实验与草稿。新功能改正式源码；实验结论整理到 `docs/`，不要把临时脚本当产品入口。
-- 首个范围仅英译中。花纹、Logo、人物等方向尚未进入工程。远端仅支持用户配置的 DeepSeek；无截图持久化、Developer ID 签名或公证。0.1.9 起有应用内升级（electron/updater.js、mac-self-update.js，契约 docs/changes/0.1.9-in-app-update.md）：macOS 用固定自签证书「EasyLens Self-Signed」并自更新，Windows/Linux 只检查新版并打开下载页。tag 只打在 feat/gbot 上。
+- 首个范围仅英译中。花纹、Logo、人物等方向尚未进入工程。远端仅支持用户配置的 DeepSeek；无截图持久化、Developer ID 签名或公证。0.1.9 起有应用内升级（electron/updater.js、mac-self-update.js，契约 docs/changes/0.1.9-in-app-update.md）：macOS 用固定自签证书「EasyLens Self-Signed」并自更新，Windows/Linux 只检查新版并打开下载页。新版 tag 只对通过 Verify 的 master 主线提交发布；历史 feat/gbot 标签保留。详见 [发布与验证](docs/changes/cloud-release.md)。
 
 ## 修改与验证
 

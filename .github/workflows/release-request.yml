@@ -1,0 +1,47 @@
+name: Release request
+
+on:
+  workflow_run:
+    workflows: [Release request signal]
+    branches: [release-requests]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  validate:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.actor.id == 352863755 && github.event.workflow_run.triggering_actor.id == 352863755
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      mode: ${{ steps.check.outputs.mode }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_request.py
+
+  publish:
+    needs: validate
+    if: false && needs.validate.outputs.mode == 'publish'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    concurrency:
+      group: stable-release-request
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_request.py --publish

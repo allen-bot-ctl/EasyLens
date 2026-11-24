@@ -17,11 +17,11 @@ EasyLens 是菜单栏/托盘中的英译中应用。按 **Ctrl+Alt+L**（macOS �
 | macOS Intel（x64） | `EasyLens-<version>-mac-x64.dmg`、`EasyLens-<version>-mac-x64.zip` |
 | macOS Apple Silicon（arm64） | `EasyLens-<version>-mac-arm64.dmg`、`EasyLens-<version>-mac-arm64.zip` |
 
-所有安装包均未签名、未公证。Windows SmartScreen 可能要求点击“更多信息”后选择“仍要运行”；macOS Gatekeeper 可能需要在“系统设置 → 隐私与安全性”中允许，或右键点击应用后选择“打开”。
+macOS 应用及选区工具使用固定自签证书，未经过 Apple Developer ID 签名或公证。Windows 安装包未签名。macOS 的 Electron 运行时支持 12+；内置原生选区工具需要 macOS 13+。仅从上面的官方 Release 下载。
 
 ## 快速开始（Electron）
 
-需要 Node.js 20+ 与 npm。Linux 桌面还需要 Electron 常见的 GTK/NSS/GBM 运行库；无桌面环境可用 `xvfb-run` 做启动检查。
+需要 Node.js 22.12+ 与 npm（CI 使用 Node.js 24）。Linux 桌面还需要 Electron 常见的 GTK/NSS/GBM 运行库；无桌面环境可用 `xvfb-run` 做启动检查。
 
 ```sh
 npm install
@@ -55,16 +55,9 @@ npx electron-builder --mac dmg zip --x64 --arm64 --publish never
 
 ## 发布流程
 
-1. 更新 `package.json` 的 `version`，确认 `npm test` 通过并提交到 `feat/gbot`。
-2. 创建与版本对应的 tag，例如 `v0.1.0`。
-3. 推送 tag 触发 `.github/workflows/release.yml`：
-
-   ```sh
-   git tag v0.1.0
-   git push origin v0.1.0
-   ```
-
-4. Actions 会并行构建 Linux x86_64、Windows x64、macOS x64 与 macOS arm64，最后用一个 publish job 创建 Release 并上传全部安装包。
+1. 在 Electron 主线更新 `package.json`、lockfile 与同版发行说明；`master` 上的无发布 **Verify** 必须验证候选完整 SHA。
+2. 已有用户发版授权时，可用 [云端发布请求](docs/changes/cloud-release.md)。既有标签入口保留，只允许为已验证且未发布的版本建立新标签；不重写旧 tag。
+3. 按 Release job、公开的安装文件/校验值和更新源分别核验。安装、重启及授权保留需要单独真机验证。
 
 ## 使用
 
@@ -102,4 +95,4 @@ Windows x64 与 macOS 安装包由 CI 构建，但本仓库尚未在这些系统
 - [docs/engineering.md](docs/engineering.md)：Electron 正式入口与 macOS Swift 原型归档。
 - [AGENTS.md](AGENTS.md)：协作和检查约定。
 
-`electron/` 是正式源码；`Sources/EasyLens/` 保留为 macOS 行为参考；`tmp/scripts/` 保留前期实验，不是应用入口。当前所有平台构建均未做正式代码签名、公证、安装包升级或自动更新。
+`electron/` 是正式源码；`Sources/EasyLens/` 保留为 macOS 行为参考；`tmp/scripts/` 保留前期实验，不是应用入口。现有 macOS 自更新使用固定自签身份和客户端验签，未做 Apple Developer ID 签名或公证；Windows/Linux 仅检查更新并打开下载页。

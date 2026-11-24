@@ -208,6 +208,12 @@ function setupAutoUpdate(options) {
     const reason = outcome && outcome.reason ? outcome.reason : 'unknown';
     log(`self-update failed: ${reason}`);
     const kind = classifyFailure(reason);
+    if (kind === 'signature') {
+      // An authenticity failure is not a reason to offer an unverified DMG
+      // from the same release as an automatic fallback.
+      emitStatus('error', { manual, name, reason });
+      return;
+    }
     if (kind === 'offline') {
       // 下载中断：半截文件已经删掉，托盘回到「检查更新…」，下一次定时检查再试。
       emitStatus('error', { manual, name, reason });

@@ -1,15 +1,15 @@
 'use strict';
 
-// In-app self update for fully unsigned macOS builds.
+// In-app update for macOS builds using the fixed EasyLens signing certificate.
 //
-// Squirrel.Mac refuses to work without a code signature, so the updater falls
+// Squirrel.Mac is not used for our self-signed distribution, so the updater falls
 // back to probing the public update feed and then hands the release zip to this
 // module. Everything here is deliberately injectable (fetch/execFile/spawn/fs/
 // path/logger) so tests never touch the network or a real /Applications bundle.
 //
 // The update is downloaded from the GitHub release URL, verified against the
 // published .sha256 asset, extracted with ditto, checked against its
-// CFBundleShortVersionString, and installed by a small /bin/sh script after the
+// CFBundleShortVersionString and the pinned signer, and installed by a small /bin/sh script after the
 // current process exits. If anything looks wrong we fall back to a manual DMG
 // download instead of replacing the app.
 
@@ -29,6 +29,12 @@ const VERIFIED_FILE = 'verified.json';
 const INSTALL_SCRIPT_NAME = 'update-install.sh';
 const INSTALL_LOG_NAME = 'update-install.log';
 const APP_NAME = 'EasyLens.app';
+// Public certificate fingerprint, not a signing secret. This is the same
+// requirement pinned by build/expected-designated.txt for TCC continuity.
+const CERT_REQUIREMENT = 'certificate leaf = H"1657831a24c28d34848175bdd74d0435e934b6ed"';
+const APP_REQUIREMENT = 'identifier "ai.nangua.EasyLens" and ' + CERT_REQUIREMENT;
+const READER_RELATIVE = 'Contents/Resources/app/electron/bin/macos-selection-reader';
+
 // 0.1.9：EasyLens 同时发 x64 和 arm64，按 process.arch 选对应的 zip。
 const SUPPORTED_ARCHES = Object.freeze(['x64', 'arm64']);
 // `file -b` 输出里的架构名，用来核对解压出来的 .app 是不是本机芯片。
@@ -63,6 +69,18 @@ while kill -0 "$PID" 2>/dev/null; do
   sleep 1
   waited=$((waited + 1))
 done
+
+# The staged bundle might have changed while the existing app was waiting
+# for the user to restart. Recheck after the wait and before either bundle move.
+READER="$NEW_APP/${READER_RELATIVE}"
+if [ -L "$NEW_APP" ] || [ -L "$READER" ] || [ ! -f "$READER" ] ||
+   ! /usr/bin/codesign --verify --deep --strict "$NEW_APP" ||
+   ! /usr/bin/codesign --verify --strict -R '=${APP_REQUIREMENT}' "$NEW_APP" ||
+   ! /usr/bin/codesign --verify --strict -R '=${CERT_REQUIREMENT}' "$READER"; then
+  say "update-install: pinned signature check failed; leaving current app unchanged"
+  /usr/bin/open -n "$BUNDLE"
+  exit 1
+fi
 
 say "update-install: moving current app to backup"
 if ! mv "$BUNDLE" "$BACKUP"; then
@@ -156,6 +174,7 @@ function deriveReleasePageUrl(version) {
 // - manual：其他（不在「应用程序」目录、被隔离运行、解压失败等）→ 打开 dmg
 function classifyFailure(reason) {
   const text = typeof reason === 'string' ? reason : '';
+  if (text.startsWith('signature-')) return 'signature';
   if (text === 'unsupported-arch' || text.startsWith('arch-mismatch')) return 'arch';
   if (text.startsWith('sha256-mismatch') || text === 'sha256-missing-or-invalid') {
     return 'checksum';
@@ -410,6 +429,38 @@ function writeVerifiedMarker(staging, version, fsImpl, pathImpl) {
   );
 }
 
+// Used by the release runner as well: test the exact application-side policy.
+async function verifyAppSignature(newApp, {
+  execFile = defaultExecFile, fsImpl = nodeFs, pathImpl = nodePath
+} = {}) {
+  const reader = pathImpl.join(newApp, READER_RELATIVE);
+  try {
+    if (!fsImpl.lstatSync(reader).isFile() ||
+        fsImpl.realpathSync(reader) !== pathImpl.join(fsImpl.realpathSync(newApp), READER_RELATIVE)) {
+      return { ok: false, reason: 'signature-reader-not-regular' };
+    }
+  } catch {
+    return { ok: false, reason: 'signature-reader-missing' };
+  }
+
+  // A successful --verify alone can also mean a valid signature by an
+  // unrelated or ad-hoc signer. Explicitly evaluate our pinned requirements.
+  const checks = [
+    ['app-integrity', ['--verify', '--deep', '--strict', newApp]],
+    ['app-identity', ['--verify', '--strict', '-R', '=' + APP_REQUIREMENT, newApp]],
+    ['reader-identity', ['--verify', '--strict', '-R', '=' + CERT_REQUIREMENT, reader]]
+  ];
+  for (const [check, args] of checks) {
+    try {
+      await runExec(execFile, '/usr/bin/codesign', args, { timeout: 60_000 });
+    } catch (error) {
+      return { ok: false, reason: `signature-${check}-failed: ${error.message || error}` };
+    }
+  }
+
+  return { ok: true };
+}
+
 async function verifyStagedApp(context) {
   const {
     newApp,
@@ -496,6 +547,9 @@ async function verifyStagedApp(context) {
       log(`arch check skipped: ${error.message || error}`);
     }
   }
+
+  const signature = await verifyAppSignature(newApp, { execFile, fsImpl, pathImpl });
+  if (!signature.ok) return signature;
 
   log(`verified staged app ${newApp} as v${version}`);
   return { ok: true };
@@ -729,7 +783,7 @@ async function prepareStaging(context) {
 
   try {
     fsImpl.rmSync(staging, { recursive: true, force: true });
-    fsImpl.mkdirSync(staging, { recursive: true });
+    fsImpl.mkdirSync(staging, { mode: 0o700 });
   } catch (error) {
     return { ok: false, reason: `staging-create-failed: ${error.message || error}` };
   }
@@ -765,6 +819,7 @@ async function prepareStaging(context) {
       {}
     );
   } catch (error) {
+    try { fsImpl.rmSync(staging, { recursive: true, force: true }); } catch { /* best effort */ }
     return { ok: false, reason: `extract-failed: ${error.message || error}` };
   }
 
@@ -1074,5 +1129,6 @@ module.exports = {
   parseSha256File,
   parseSha256: parseSha256File,
   buildInstallScript: () => INSTALL_SCRIPT,
+  verifyAppSignature,
   createMacSelfUpdater
 };

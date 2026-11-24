@@ -21,7 +21,7 @@ let package = Package(
                 .linkedFramework("Vision"),
             ]
         ),
-        .testTarget(name: "EasyLensTests", dependencies: ["EasyLens"]),
+        .testTarget(name: "EasyLensTests", dependencies: ["EasyLens"], path: "SwiftTests/EasyLensTests"),
     ],
     swiftLanguageModes: [.v5]
 )

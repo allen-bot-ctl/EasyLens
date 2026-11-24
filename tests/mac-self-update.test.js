@@ -25,6 +25,8 @@ const { setupAutoUpdate } = require('../electron/updater');
 
 const APP_VERSION = '0.1.5';
 const NEXT_VERSION = '0.1.6';
+const READER_RELATIVE = 'Contents/Resources/app/electron/bin/macos-selection-reader';
+const EXPECTED_REQUIREMENT = fs.readFileSync(path.join(__dirname, '../build/expected-designated.txt'), 'utf8').trim();
 
 function tempDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'easylens-self-update-'));
@@ -93,6 +95,9 @@ function createExtractedApp(destination, version, executable = 'EasyLens') {
   fs.mkdirSync(path.join(appDir, 'Contents', 'MacOS'), { recursive: true });
   fs.writeFileSync(path.join(appDir, 'Contents', 'Info.plist'), '<plist/>');
   fs.writeFileSync(path.join(appDir, 'Contents', 'MacOS', executable), '');
+  const reader = path.join(appDir, READER_RELATIVE);
+  fs.mkdirSync(path.dirname(reader), { recursive: true });
+  fs.writeFileSync(reader, 'fixture');
   return { appDir, version };
 }
 
@@ -127,6 +132,13 @@ function makeExecFile(options = {}) {
         } else {
           callback(null, options.fileOutput, '');
         }
+        return;
+      }
+      if (file === '/usr/bin/codesign') {
+        const check = args.includes('--deep') ? 'app-integrity'
+          : args.at(-1).endsWith('macos-selection-reader') ? 'reader-identity' : 'app-identity';
+        const rejection = options.signatureFailure?.(check);
+        callback(rejection ? new Error(rejection) : null, '', '');
         return;
       }
       if (file === '/usr/bin/xattr') {
@@ -188,7 +200,8 @@ function fullEnvironment(t, options = {}) {
   const exec = makeExecFile({
     plistVersion: options.plistVersion || version,
     executable: options.executable,
-    fileOutput: options.fileOutput
+    fileOutput: options.fileOutput,
+    signatureFailure: options.signatureFailure
   });
   const env = {
     bundle,
@@ -559,10 +572,51 @@ test('only one self-update job is in flight at a time', async (t) => {
   assert.equal(zipCalls, 1);
 });
 
+test('a matching release checksum cannot authorize a different app or helper signer', async (t) => {
+  for (const check of ['app-integrity', 'app-identity', 'reader-identity']) {
+    await t.test(check, async (t) => {
+      const env = fullEnvironment(t, { signatureFailure: (name) => name === check && 'invalid signature or requirement' });
+      const { updater, spawnCalls } = makeSelfUpdater({ bundle: env.bundle, fetch: env.fetchImpl, execFile: env.execFile, logsDir: env.logsDir });
+      const result = await updater.start(env.update);
+      assert.equal(result.ok, false);
+      assert.match(result.reason, new RegExp(`^signature-${check}-failed:`));
+      assert.equal(classifyFailure(result.reason), 'signature');
+      assert.equal(updater.lastReady, null);
+      assert.equal(updater.installReady().ok, false);
+      assert.equal(spawnCalls.length, 0);
+      assert.equal(env.execCalls.some(({ file }) => file.endsWith('/xattr')), false);
+      assert.deepEqual(fs.readdirSync(env.bundle.parent), ['EasyLens.app']);
+    });
+  }
+});
+
+test('a staged marker cannot bypass re-verification of the pinned app and helper', async (t) => {
+  let rejected = false;
+  const env = fullEnvironment(t, { signatureFailure: (check) => rejected && check === 'reader-identity' && 'wrong leaf' });
+  const context = { bundle: env.bundle, fetch: env.fetchImpl, execFile: env.execFile, logsDir: env.logsDir };
+  const first = await makeSelfUpdater(context).updater.start(env.update);
+  assert.equal(first.ok, true, first.reason);
+  const signing = env.execCalls.filter(({ file }) => file.endsWith('/codesign')).map(({ args }) => args);
+  assert.deepEqual(signing, [
+    ['--verify', '--deep', '--strict', first.newApp],
+    ['--verify', '--strict', '-R', '=' + EXPECTED_REQUIREMENT, first.newApp],
+    ['--verify', '--strict', '-R', '=' + EXPECTED_REQUIREMENT.split(' and ')[1], path.join(first.newApp, READER_RELATIVE)]
+  ]);
+  rejected = true;
+  const next = await makeSelfUpdater(context).updater.start(env.update);
+  assert.match(next.reason, /^signature-reader-identity-failed:/);
+  assert.equal(fs.existsSync(first.staging), false);
+  assert.equal(env.fetchCalls.length, 4, 'rejected cache is not reused');
+});
+
 test('install script is static, positional and contains wait plus rollback', () => {
   assert.match(INSTALL_SCRIPT, /while kill -0 "\$PID" 2>\/dev\/null; do/);
   assert.match(INSTALL_SCRIPT, /if \[ "\$waited" -ge 60 \]/);
   assert.match(INSTALL_SCRIPT, /mv "\$BACKUP" "\$BUNDLE"/);
+  assert.ok(INSTALL_SCRIPT.includes(`-R '=${EXPECTED_REQUIREMENT}' "$NEW_APP"`));
+  const verification = INSTALL_SCRIPT.indexOf('/usr/bin/codesign --verify');
+  assert.ok(verification > INSTALL_SCRIPT.indexOf('while kill -0'));
+  assert.ok(verification < INSTALL_SCRIPT.indexOf('mv "$BUNDLE" "$BACKUP"'));
   assert.match(INSTALL_SCRIPT, /\/usr\/bin\/open -n "\$BUNDLE"/);
   assert.match(INSTALL_SCRIPT, /\$1/);
   assert.match(INSTALL_SCRIPT, /\$5/);
@@ -770,6 +824,31 @@ test('probe-only mode falls back to the direct DMG when self-update fails', asyn
     `https://github.com/allen-bot-ctl/EasyLens/releases/download/v${NEXT_VERSION}/EasyLens-${NEXT_VERSION}-mac-x64.dmg`;
   assert.deepEqual(manualCalls, [{ name: update.name, url: expectedUrl }]);
   assert.equal(collector.statuses.at(-1).url, expectedUrl);
+});
+
+test('an authenticity failure does not offer another download from the rejected release', async (t) => {
+  const collector = makeCollector();
+  const manualCalls = [];
+  const update = updateFor(NEXT_VERSION);
+  const reason = 'signature-app-identity-failed: wrong leaf';
+  const updater = setupAutoUpdate({
+    app: makeProbeApp(),
+    autoUpdater: makeAutoUpdater(),
+    net: { fetch: async () => ({ status: 200, json: async () => update }) },
+    selfUpdate: { available: true, start: async () => ({ ok: false, reason, version: NEXT_VERSION }) },
+    onStatus: collector.onStatus,
+    onManual: (payload) => manualCalls.push(payload),
+    platform: 'darwin',
+    arch: 'x64',
+    schedule: false
+  });
+  t.after(() => updater.stop());
+
+  updater.checkNow({ manual: true });
+  await collector.waitFor('error');
+  assert.deepEqual(collector.statuses.map((status) => status.state), ['checking', 'downloading', 'error']);
+  assert.equal(collector.statuses.at(-1).reason, reason);
+  assert.deepEqual(manualCalls, []);
 });
 
 // ---- 0.1.9 EasyLens：x64 + arm64、文件名正则、sha256 回退、芯片不匹配、下载中断 ----

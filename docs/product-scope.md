@@ -12,13 +12,13 @@ Linux 没有 Accessibility 的跨应用选区几何。完整选区优先读取 P
 
 ## 当前边界
 
-- 只在 Linux 桌面上验证了 Electron 入口；macOS/Windows 的 Electron 构建尚未验证。原 Swift 程序仍需要 macOS 15+、Xcode 16+ 和系统权限，保留为参考实现。
+- Linux 已有运行验证；macOS 和 Windows 安装包由相应 CI 构建，Windows 真实安装、macOS 权限及真实升级需要分别验收。原 Swift 程序仍需要 macOS 15+、Xcode 16+ 和系统权限，保留为参考实现。
 - OCR 精度低于 macOS Vision；复杂字体、低分辨率、暗色界面、斜体和多列排版可能定位偏移或漏识别。
 - 本地长选区翻译是逐行/逐词回退，不保证语法通顺。需要完整译文时应配置 DeepSeek；目前唯一的远端翻译提供方是 DeepSeek。
-- 完整选区没有辅助功能命中几何，PRIMARY/剪贴板回退可能误判；不可用时退回单词。
+- macOS 使用原生划选辅助功能；Linux 的 PRIMARY 和 Windows 的近期剪贴板回退没有辅助功能命中几何，可能误判；不可用时退回单词。
 - 屏幕捕获在 Wayland 下依赖 PipeWire/portal，黑屏时优先使用 X11；托盘图标可能需要桌面环境的 AppIndicator 扩展。
 - 不持久化截图；只有显式设置 `EASYLENS_DEBUG_CAPTURE=1` 时才把最近一帧写到系统临时目录用于诊断。
-- 当前是本地开发构建；正式发布签名、公证、安装包升级和自动更新尚未实现。
+- macOS 发行包使用固定自签证书，不是 Developer ID 签名或公证；支持应用内更新。Windows/Linux 只检查新版本并打开下载页面。
 - 花纹、Logo、人物等识别类型属于后续探索，不据此预设框架。
 
 工程结构与验证记录见 [electron.md](electron.md)；macOS Swift 原型归档见 [engineering.md](engineering.md)。

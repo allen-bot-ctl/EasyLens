@@ -1,0 +1,43 @@
+name: Verify
+
+on:
+  push:
+    branches: [master, integration/electron-master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    if: github.repository == 'allen-bot-ctl/EasyLens' && github.actor_id == '352863755'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -v
+
+  package:
+    needs: tests
+    uses: ./.github/workflows/package-app.yml
+    with:
+      commit: ${{ github.sha }}
+      upload: false
+    secrets:
+      EASYLENS_SIGN_P12: ${{ secrets.EASYLENS_SIGN_P12 }}
+      EASYLENS_SIGN_PASSWORD: ${{ secrets.EASYLENS_SIGN_PASSWORD }}
+
+  verified:
+    needs: [tests, package]
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      TESTS: ${{ needs.tests.result }}
+      PACKAGE: ${{ needs.package.result }}
+    steps:
+      - run: test "$TESTS" = success && test "$PACKAGE" = success

@@ -1,0 +1,243 @@
+name: Package EasyLens
+
+on:
+  workflow_call:
+    inputs:
+      commit:
+        type: string
+        required: true
+      upload:
+        type: boolean
+        default: false
+    secrets:
+      EASYLENS_SIGN_P12:
+        required: true
+      EASYLENS_SIGN_PASSWORD:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Build Linux x86_64 packages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Verify bundled OCR data
+        run: npm run test:ocr
+
+      - name: Read package version
+        id: package-version
+        run: echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
+
+      - name: Build Linux AppImage and directory bundle
+        run: npx electron-builder --linux AppImage dir --x64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Launch unpacked Linux binary with Xvfb
+        run: xvfb-run -a --server-args='-screen 0 1280x800x24' dist/linux-unpacked/easylens --smoke-test --no-sandbox --disable-dev-shm-usage
+
+      - name: Package unpacked directory
+        run: |
+          set -euo pipefail
+          cd dist/linux-unpacked
+          zip -qr "../EasyLens-${{ steps.package-version.outputs.version }}-linux-x64-dir.zip" .
+
+      - name: Upload Linux artifacts
+        if: inputs.upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          if-no-files-found: error
+          path: |
+            dist/*.AppImage
+            dist/EasyLens-*-linux-*-dir.zip
+
+  windows:
+    name: Build Windows x64 installer
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        shell: bash
+        run: node --test tests/*.test.js
+
+      - name: Build Windows x64 NSIS installer
+        run: npx electron-builder --win nsis --x64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Upload Windows artifacts
+        if: inputs.upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          if-no-files-found: error
+          path: dist/*.exe
+
+  macos:
+    name: Build macOS Intel and Apple Silicon packages
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      # 0.1.14 契约 P1/P3：真 Electron 里眼睛收起后 3 秒绘制 0 帧，再唤出 200ms 内恢复。
+      - name: Idle frame test (real Electron)
+        timeout-minutes: 3
+        run: sh scripts/idle-frame-test.sh
+
+      # 0.1.9：固定自签证书「EasyLens Self-Signed」（照搬栏历 0.1.52）。p12 只在 Secrets 里。
+      - name: Import stable signing certificate
+        shell: bash
+        env:
+          EASYLENS_SIGN_P12: ${{ secrets.EASYLENS_SIGN_P12 }}
+          EASYLENS_SIGN_PASSWORD: ${{ secrets.EASYLENS_SIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [ -n "$EASYLENS_SIGN_P12" ] || { echo "::error::EASYLENS_SIGN_P12 secret missing"; exit 1; }
+          kc="$RUNNER_TEMP/easylens-sign.keychain-db"
+          kcpass=$(openssl rand -hex 16)
+          echo "$EASYLENS_SIGN_P12" | base64 --decode > "$RUNNER_TEMP/easylens-sign.p12"
+          security create-keychain -p "$kcpass" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kcpass" "$kc"
+          security import "$RUNNER_TEMP/easylens-sign.p12" -k "$kc" -P "$EASYLENS_SIGN_PASSWORD" -T /usr/bin/codesign -f pkcs12
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpass" "$kc" >/dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          openssl pkcs12 -in "$RUNNER_TEMP/easylens-sign.p12" -nokeys -passin env:EASYLENS_SIGN_PASSWORD -legacy -out "$RUNNER_TEMP/easylens-sign.pem" 2>/dev/null \
+            || openssl pkcs12 -in "$RUNNER_TEMP/easylens-sign.p12" -nokeys -passin env:EASYLENS_SIGN_PASSWORD -out "$RUNNER_TEMP/easylens-sign.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/easylens-sign.pem"
+          rm -f "$RUNNER_TEMP/easylens-sign.p12"
+          security find-identity -p codesigning "$kc"
+          echo "EASYLENS_SIGN_KEYCHAIN=$kc" >> "$GITHUB_ENV"
+
+      - name: Build macOS selection reader (universal)
+        run: |
+          mkdir -p electron/bin
+          SOURCES="Sources/EasyLens/SelectionReader.swift Sources/EasyLens/FocusText.swift electron/native/FocusedTranslationStub.swift electron/native/macos-selection-main.swift"
+          swiftc -O -target arm64-apple-macos13.0 $SOURCES -o electron/bin/macos-selection-reader-arm64
+          swiftc -O -target x86_64-apple-macos13.0 $SOURCES -o electron/bin/macos-selection-reader-x64
+          lipo -create electron/bin/macos-selection-reader-arm64 electron/bin/macos-selection-reader-x64 -output electron/bin/macos-selection-reader
+          rm -f electron/bin/macos-selection-reader-arm64 electron/bin/macos-selection-reader-x64
+          codesign --force --sign "EasyLens Self-Signed" --timestamp=none --keychain "$EASYLENS_SIGN_KEYCHAIN" electron/bin/macos-selection-reader
+          codesign -dv --verbose=2 electron/bin/macos-selection-reader 2>&1 | tee /tmp/reader-src.log
+          grep -q "Authority=EasyLens Self-Signed" /tmp/reader-src.log || { echo "::error::selection-reader not signed by EasyLens Self-Signed"; exit 1; }
+
+      # identity "-" 让 electron-builder 先做临时签名，afterSign 钩子 scripts/stable-sign.js
+      # 再用固定证书重签 reader 和整个 .app（x64、arm64 各一次），然后才打 dmg/zip。
+      - name: Build macOS dmg and zip for x64 and arm64
+        run: npx electron-builder --mac dmg zip --x64 --arm64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          EASYLENS_SIGN_IDENTITY: "EasyLens Self-Signed"
+
+      - name: Verify stable signature (x64 and arm64)
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=$(cat build/expected-designated.txt)
+          for pair in "mac:x86_64" "mac-arm64:arm64"; do
+            dir="dist/${pair%%:*}"; want="${pair##*:}"
+            app=$(find "$dir" -maxdepth 1 -type d -name '*.app' -print -quit)
+            [ -n "$app" ] || { echo "::error::no .app under $dir"; exit 1; }
+            echo "== $app"
+            icon=$(plutil -extract CFBundleIconFile raw "$app/Contents/Info.plist")
+            echo "RELEASE: icon=$icon"
+            case "$icon" in electron|electron.icns) echo "::error::$app still uses the default Electron icon"; exit 1;; esac
+            [ -f "$app/Contents/Resources/${icon%.icns}.icns" ] || { echo "::error::$app missing icon file $icon"; exit 1; }
+            rm -rf /tmp/appicon.iconset && iconutil -c iconset -o /tmp/appicon.iconset "$app/Contents/Resources/${icon%.icns}.icns"
+            ls /tmp/appicon.iconset
+            [ -f /tmp/appicon.iconset/icon_512x512@2x.png ] || { echo "::error::$app icon has no 1024px image"; exit 1; }
+            echo "RELEASE: icon 1024=$(sips -g pixelWidth /tmp/appicon.iconset/icon_512x512@2x.png | awk '/pixelWidth/{print $2}')"
+            if [ -f "$app/Contents/Resources/electron.icns" ] && cmp -s "$app/Contents/Resources/electron.icns" "$app/Contents/Resources/${icon%.icns}.icns"; then echo "::error::$app icon is the Electron default"; exit 1; fi
+            main_bin="$app/Contents/MacOS/EasyLens"
+            archs=$(lipo -archs "$main_bin")
+            [ "$archs" = "$want" ] || { echo "::error::$app archs=$archs, expected $want"; exit 1; }
+            codesign -dv --verbose=2 "$app" 2>&1 | tee /tmp/codesign.log
+            grep -q "Authority=EasyLens Self-Signed" /tmp/codesign.log || { echo "::error::$app not signed by EasyLens Self-Signed"; exit 1; }
+            if grep -q "Signature=adhoc" /tmp/codesign.log; then echo "::error::$app still ad-hoc"; exit 1; fi
+            codesign -d -r- "$app" 2>&1 | tee /tmp/dr.txt
+            actual=$(grep -o 'designated => .*' /tmp/dr.txt | sed 's/^designated => //')
+            [ "$actual" = "$expected" ] || { echo "::error::designated mismatch for $app"; echo "expected: $expected"; echo "actual:   $actual"; exit 1; }
+            codesign --verify --deep --strict "$app"
+            reader="$app/Contents/Resources/app/electron/bin/macos-selection-reader"
+            [ -f "$reader" ] || { echo "::error::missing $reader"; exit 1; }
+            codesign -dv --verbose=2 "$reader" 2>&1 | tee /tmp/reader.log
+            grep -q "Authority=EasyLens Self-Signed" /tmp/reader.log || { echo "::error::selection-reader not signed by EasyLens Self-Signed"; exit 1; }
+            echo "RELEASE: $want designated=$actual"
+          done
+          echo "RELEASE: codesign=stable x64+arm64"
+
+      - name: Generate zip checksums for in-app update
+        run: |
+          set -euo pipefail
+          cd dist
+          for arch in x64 arm64; do
+            f=$(ls EasyLens-*-mac-$arch.zip)
+            shasum -a 256 "$f" > "$f.sha256"
+            cat "$f.sha256"
+          done
+
+      - name: Test actual signed ZIPs using runtime verifier
+        run: bash scripts/verify-signed-zip.sh
+
+      - name: Upload macOS artifacts
+        if: inputs.upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-x64-arm64
+          if-no-files-found: error
+          path: |
+            dist/EasyLens-*-mac-*.dmg
+            dist/EasyLens-*-mac-*.zip
+            dist/EasyLens-*-mac-*.zip.sha256

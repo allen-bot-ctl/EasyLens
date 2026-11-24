@@ -1,6 +1,6 @@
 {
   "name": "easylens",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "private": true,
   "description": "EasyLens: a tray eye lens that translates English under the cursor into Chinese.",
   "homepage": "https://allen-bot-ctl.github.io/EasyLens/",
@@ -12,7 +12,7 @@
   "author": "EasyLens",
   "license": "UNLICENSED",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12.0"
   },
   "scripts": {
     "start": "electron .",
@@ -28,7 +28,7 @@
     "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
-    "electron": "^31.7.7",
+    "electron": "43.8.12",
     "electron-builder": "^26.0.12"
   },
   "build": {

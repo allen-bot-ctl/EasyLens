@@ -1,0 +1,14 @@
+name: Release request signal
+
+on:
+  push:
+    branches: [release-requests]
+    paths: [.github/release-request.json]
+
+permissions: {}
+
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Release request received; no release permissions in this workflow."

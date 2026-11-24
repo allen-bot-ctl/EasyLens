@@ -4,264 +4,93 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable tag
+        type: string
+        required: true
+      commit:
+        description: Exact approved master commit
+        type: string
+        required: true
 
-permissions:
-  contents: write
+permissions: {}
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-stable
   cancel-in-progress: false
 
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  APPROVED_SHA: ${{ inputs.commit }}
+
 jobs:
-  # 0.1.9 契约：发版说明必须来自 release-notes/<tag>.md，缺文件就失败；
-  # tag 只能打在 feat/gbot 的提交上（master 是 Swift 原型，不能让更新源拿到它）。
   preflight:
-    name: Check release notes and branch
+    name: Verify release tag and successful master CI
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      commit: ${{ steps.verify.outputs.commit }}
     steps:
-      - name: Checkout
+      - name: Checkout exact candidate, or the tag for the historical tag-push entry
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.commit || github.ref }}
           fetch-depth: 0
-
-      - name: Release notes must exist
-        run: |
-          set -euo pipefail
-          NOTES="release-notes/${GITHUB_REF_NAME}.md"
-          [ -s "$NOTES" ] || { echo "::error::缺少发版说明 $NOTES"; exit 1; }
-          echo "RELEASE: notes=$NOTES"
-
-      - name: Tag must be on feat/gbot
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin feat/gbot
-          git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD \
-            || { echo "::error::tag ${GITHUB_REF_NAME} 不在 feat/gbot 上"; exit 1; }
-          echo "RELEASE: branch=feat/gbot"
-
-      - name: Tag must match package.json version
-        run: |
-          set -euo pipefail
-          v=$(node -p 'require("./package.json").version')
-          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "::error::package.json $v 与 tag $GITHUB_REF_NAME 不一致"; exit 1; }
-
-  linux:
-    name: Build Linux x86_64 packages
-    needs: preflight
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run tests
-        run: npm test
-
-      - name: Read package version
-        id: package-version
-        run: echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
-
-      - name: Build Linux AppImage and directory bundle
-        run: npx electron-builder --linux AppImage dir --x64 --publish never
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
-
-      - name: Package unpacked directory
-        run: |
-          set -euo pipefail
-          cd dist/linux-unpacked
-          zip -qr "../EasyLens-${{ steps.package-version.outputs.version }}-linux-x64-dir.zip" .
-
-      - name: Upload Linux artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-x64
-          if-no-files-found: error
-          path: |
-            dist/*.AppImage
-            dist/EasyLens-*-linux-*-dir.zip
-
-  windows:
-    name: Build Windows x64 installer
-    needs: preflight
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run tests
-        shell: bash
-        run: node --test tests/*.test.js
-
-      - name: Build Windows x64 NSIS installer
-        run: npx electron-builder --win nsis --x64 --publish never
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
-
-      - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-x64
-          if-no-files-found: error
-          path: dist/*.exe
-
-  macos:
-    name: Build macOS Intel and Apple Silicon packages
-    needs: preflight
-    runs-on: macos-latest
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run tests
-        run: npm test
-
-      # 0.1.14 契约 P1/P3：真 Electron 里眼睛收起后 3 秒绘制 0 帧，再唤出 200ms 内恢复。
-      - name: Idle frame test (real Electron)
-        timeout-minutes: 3
-        run: sh scripts/idle-frame-test.sh
-
-      # 0.1.9：固定自签证书「EasyLens Self-Signed」（照搬栏历 0.1.52）。p12 只在 Secrets 里。
-      - name: Import stable signing certificate
+          persist-credentials: false
+      - name: Validate tag, branch and verification evidence
+        id: verify
         shell: bash
         env:
-          EASYLENS_SIGN_P12: ${{ secrets.EASYLENS_SIGN_P12 }}
-          EASYLENS_SIGN_PASSWORD: ${{ secrets.EASYLENS_SIGN_PASSWORD }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [ -n "$EASYLENS_SIGN_P12" ] || { echo "::error::EASYLENS_SIGN_P12 secret missing"; exit 1; }
-          kc="$RUNNER_TEMP/easylens-sign.keychain-db"
-          kcpass=$(openssl rand -hex 16)
-          echo "$EASYLENS_SIGN_P12" | base64 --decode > "$RUNNER_TEMP/easylens-sign.p12"
-          security create-keychain -p "$kcpass" "$kc"
-          security set-keychain-settings -lut 21600 "$kc"
-          security unlock-keychain -p "$kcpass" "$kc"
-          security import "$RUNNER_TEMP/easylens-sign.p12" -k "$kc" -P "$EASYLENS_SIGN_PASSWORD" -T /usr/bin/codesign -f pkcs12
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpass" "$kc" >/dev/null
-          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
-          openssl pkcs12 -in "$RUNNER_TEMP/easylens-sign.p12" -nokeys -passin env:EASYLENS_SIGN_PASSWORD -legacy -out "$RUNNER_TEMP/easylens-sign.pem" 2>/dev/null \
-            || openssl pkcs12 -in "$RUNNER_TEMP/easylens-sign.p12" -nokeys -passin env:EASYLENS_SIGN_PASSWORD -out "$RUNNER_TEMP/easylens-sign.pem"
-          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/easylens-sign.pem"
-          rm -f "$RUNNER_TEMP/easylens-sign.p12"
-          security find-identity -p codesigning "$kc"
-          echo "EASYLENS_SIGN_KEYCHAIN=$kc" >> "$GITHUB_ENV"
+          [[ "$TAG" =~ ^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$ ]]
+          [[ "$GITHUB_ACTOR_ID" = 352863755 || "$GITHUB_ACTOR" = 'github-actions[bot]' ]]
+          sha="$(git rev-parse HEAD)"
+          if [[ "$GITHUB_EVENT_NAME" = workflow_dispatch ]]; then
+            [[ "$APPROVED_SHA" =~ ^[0-9a-f]{40}$ ]]
+            test "$sha" = "$APPROVED_SHA"
+            test "$GITHUB_REF" = refs/heads/master
+            test "$GITHUB_WORKFLOW_SHA" = "$sha"
+          fi
+          git fetch --no-tags origin "refs/tags/$TAG:refs/release-verify/$TAG" refs/heads/master
+          test "$(git rev-parse "refs/release-verify/$TAG^{commit}")" = "$sha"
+          git merge-base --is-ancestor "$sha" FETCH_HEAD
+          gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/verify.yml/runs" \
+            -f branch=master -f "head_sha=$sha" -f event=push -f status=success \
+            --jq '.workflow_runs[].id' | grep -Eq '^[0-9]+$'
+          test -s "release-notes/$TAG.md"
+          test "v$(node -p 'require("./package.json").version')" = "$TAG"
+          echo "commit=$sha" >> "$GITHUB_OUTPUT"
 
-      - name: Build macOS selection reader (universal)
-        run: |
-          mkdir -p electron/bin
-          SOURCES="Sources/EasyLens/SelectionReader.swift Sources/EasyLens/FocusText.swift electron/native/FocusedTranslationStub.swift electron/native/macos-selection-main.swift"
-          swiftc -O -target arm64-apple-macos13.0 $SOURCES -o electron/bin/macos-selection-reader-arm64
-          swiftc -O -target x86_64-apple-macos13.0 $SOURCES -o electron/bin/macos-selection-reader-x64
-          lipo -create electron/bin/macos-selection-reader-arm64 electron/bin/macos-selection-reader-x64 -output electron/bin/macos-selection-reader
-          rm -f electron/bin/macos-selection-reader-arm64 electron/bin/macos-selection-reader-x64
-          codesign --force --sign "EasyLens Self-Signed" --timestamp=none --keychain "$EASYLENS_SIGN_KEYCHAIN" electron/bin/macos-selection-reader
-          codesign -dv --verbose=2 electron/bin/macos-selection-reader 2>&1 | tee /tmp/reader-src.log
-          grep -q "Authority=EasyLens Self-Signed" /tmp/reader-src.log || { echo "::error::selection-reader not signed by EasyLens Self-Signed"; exit 1; }
-
-      # identity "-" 让 electron-builder 先做临时签名，afterSign 钩子 scripts/stable-sign.js
-      # 再用固定证书重签 reader 和整个 .app（x64、arm64 各一次），然后才打 dmg/zip。
-      - name: Build macOS dmg and zip for x64 and arm64
-        run: npx electron-builder --mac dmg zip --x64 --arm64 --publish never
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
-          EASYLENS_SIGN_IDENTITY: "EasyLens Self-Signed"
-
-      - name: Verify stable signature (x64 and arm64)
-        shell: bash
-        run: |
-          set -euo pipefail
-          expected=$(cat build/expected-designated.txt)
-          for pair in "mac:x86_64" "mac-arm64:arm64"; do
-            dir="dist/${pair%%:*}"; want="${pair##*:}"
-            app=$(find "$dir" -maxdepth 1 -type d -name '*.app' -print -quit)
-            [ -n "$app" ] || { echo "::error::no .app under $dir"; exit 1; }
-            echo "== $app"
-            icon=$(plutil -extract CFBundleIconFile raw "$app/Contents/Info.plist")
-            echo "RELEASE: icon=$icon"
-            case "$icon" in electron|electron.icns) echo "::error::$app still uses the default Electron icon"; exit 1;; esac
-            [ -f "$app/Contents/Resources/${icon%.icns}.icns" ] || { echo "::error::$app missing icon file $icon"; exit 1; }
-            rm -rf /tmp/appicon.iconset && iconutil -c iconset -o /tmp/appicon.iconset "$app/Contents/Resources/${icon%.icns}.icns"
-            ls /tmp/appicon.iconset
-            [ -f /tmp/appicon.iconset/icon_512x512@2x.png ] || { echo "::error::$app icon has no 1024px image"; exit 1; }
-            echo "RELEASE: icon 1024=$(sips -g pixelWidth /tmp/appicon.iconset/icon_512x512@2x.png | awk '/pixelWidth/{print $2}')"
-            if [ -f "$app/Contents/Resources/electron.icns" ] && cmp -s "$app/Contents/Resources/electron.icns" "$app/Contents/Resources/${icon%.icns}.icns"; then echo "::error::$app icon is the Electron default"; exit 1; fi
-            main_bin="$app/Contents/MacOS/EasyLens"
-            archs=$(lipo -archs "$main_bin")
-            [ "$archs" = "$want" ] || { echo "::error::$app archs=$archs, expected $want"; exit 1; }
-            codesign -dv --verbose=2 "$app" 2>&1 | tee /tmp/codesign.log
-            grep -q "Authority=EasyLens Self-Signed" /tmp/codesign.log || { echo "::error::$app not signed by EasyLens Self-Signed"; exit 1; }
-            if grep -q "Signature=adhoc" /tmp/codesign.log; then echo "::error::$app still ad-hoc"; exit 1; fi
-            codesign -d -r- "$app" 2>&1 | tee /tmp/dr.txt
-            actual=$(grep -o 'designated => .*' /tmp/dr.txt | sed 's/^designated => //')
-            [ "$actual" = "$expected" ] || { echo "::error::designated mismatch for $app"; echo "expected: $expected"; echo "actual:   $actual"; exit 1; }
-            codesign --verify --deep --strict "$app"
-            reader="$app/Contents/Resources/app/electron/bin/macos-selection-reader"
-            [ -f "$reader" ] || { echo "::error::missing $reader"; exit 1; }
-            codesign -dv --verbose=2 "$reader" 2>&1 | tee /tmp/reader.log
-            grep -q "Authority=EasyLens Self-Signed" /tmp/reader.log || { echo "::error::selection-reader not signed by EasyLens Self-Signed"; exit 1; }
-            echo "RELEASE: $want designated=$actual"
-          done
-          echo "RELEASE: codesign=stable x64+arm64"
-
-      - name: Generate zip checksums for in-app update
-        run: |
-          set -euo pipefail
-          cd dist
-          for arch in x64 arm64; do
-            f=$(ls EasyLens-*-mac-$arch.zip)
-            shasum -a 256 "$f" > "$f.sha256"
-            cat "$f.sha256"
-          done
-
-      - name: Upload macOS artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-x64-arm64
-          if-no-files-found: error
-          path: |
-            dist/EasyLens-*-mac-*.dmg
-            dist/EasyLens-*-mac-*.zip
-            dist/EasyLens-*-mac-*.zip.sha256
+  package:
+    needs: preflight
+    uses: ./.github/workflows/package-app.yml
+    permissions:
+      contents: read
+    with:
+      commit: ${{ needs.preflight.outputs.commit }}
+      upload: true
+    secrets:
+      EASYLENS_SIGN_P12: ${{ secrets.EASYLENS_SIGN_P12 }}
+      EASYLENS_SIGN_PASSWORD: ${{ secrets.EASYLENS_SIGN_PASSWORD }}
 
   publish:
     name: Publish GitHub Release
-    needs:
-      - linux
-      - windows
-      - macos
+    needs: [preflight, package]
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - name: Checkout release notes
         uses: actions/checkout@v4
         with:
-          sparse-checkout: release-notes
+          ref: ${{ needs.preflight.outputs.commit }}
+          persist-credentials: false
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
@@ -276,14 +105,42 @@ jobs:
         id: notes
         run: |
           set -euo pipefail
-          NOTES="release-notes/${GITHUB_REF_NAME}.md"
+          NOTES="release-notes/${TAG}.md"
           [ -s "$NOTES" ] || { echo "::error::缺少发版说明 $NOTES"; exit 1; }
           echo "path=$NOTES" >> "$GITHUB_OUTPUT"
+
+      - name: Recheck exact remote tag and prevent updating an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFIED_SHA: ${{ needs.preflight.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "refs/tags/$TAG:refs/release-publish/$TAG"
+          test "$(git rev-parse "refs/release-publish/$TAG^{commit}")" = "$VERIFIED_SHA"
+          latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          python3 - "$latest" "$TAG" <<'PYCODE'
+          import re
+          import sys
+          def version(value):
+              if not re.fullmatch(r"v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)", value):
+                  raise SystemExit("invalid stable tag")
+              return tuple(map(int, value[1:].split(".")))
+          if version(sys.argv[2]) <= version(sys.argv[1]):
+              raise SystemExit("refusing to move latest back or overwrite a release")
+          PYCODE
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" >/dev/null 2>"$RUNNER_TEMP/existing-release.err"; then
+            echo "::error::release already exists"
+            exit 1
+          fi
+          grep -q 'HTTP 404' "$RUNNER_TEMP/existing-release.err"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: EasyLens ${{ github.ref_name }}
+          name: EasyLens ${{ env.TAG }}
+          tag_name: ${{ env.TAG }}
+          overwrite_files: false
           body_path: ${{ steps.notes.outputs.path }}
           files: |
             dist/*.AppImage

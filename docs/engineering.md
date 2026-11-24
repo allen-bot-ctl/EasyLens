@@ -23,7 +23,7 @@
 
 ### 构建与检查
 
-需要 Node.js 20+、npm，以及 Electron 在 Linux 上常用的 GTK/NSS/GBM 运行库。无桌面环境时使用 Xvfb。
+需要 Node.js 22.12+、npm，以及 Electron 在 Linux 上常用的 GTK/NSS/GBM 运行库。无桌面环境时使用 Xvfb。
 
 ```sh
 npm install
